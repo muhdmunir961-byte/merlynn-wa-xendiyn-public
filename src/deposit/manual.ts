@@ -29,7 +29,7 @@ export class ManualDepositService implements ManualDepositContract {
       createdAt: new Date().toISOString()
     };
     await this.store.saveManualDeposit(deposit);
-    return { id: deposit.id, status: deposit.status };
+    return { id: deposit.id, status: 'pending' };
   }
 
   listPending(): ManualDepositResult[] {

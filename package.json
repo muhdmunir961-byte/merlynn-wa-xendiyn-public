@@ -2,6 +2,7 @@
   "name": "merlynn-wa-xendiyn",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Minimal Baileys WhatsApp bot scaffold for Merlynn",
   "license": "UNLICENSED",
   "engines": { "node": ">=20" },
