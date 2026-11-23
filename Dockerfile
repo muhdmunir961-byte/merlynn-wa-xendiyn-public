@@ -2,7 +2,7 @@ FROM node:22-alpine
 WORKDIR /app
 RUN apk add --no-cache git
 COPY package*.json ./
-RUN npm install
+RUN npm install --include=dev
 COPY tsconfig.json .env.example ./
 COPY src ./src
 RUN npm run build
