@@ -15,7 +15,7 @@ import { parseCommand, parseOrder } from '../bot/parser.js';
 import { JsonStore } from '../persistence/json-store.js';
 import { ManualDepositService } from '../deposit/manual.js';
 import { DigiflazzClient, type PriceListItem } from '../digiflazz/client.js';
-import { ollamaLlmProvider } from '../llm/ollama.js';
+import { llmProvider } from '../llm/openai.js';
 import type { LlmProvider } from '../plugins/interfaces.js';
 import { OutgoingQueue } from './queue.js';
 import { loadAuth } from './auth.js';
@@ -137,7 +137,7 @@ export class WhatsAppClient {
   private treeCache?: { at: number; tree: CategoryNode[] };
 
   constructor(private readonly store_: JsonStore, providers?: ClientProviders) {
-    this.providers = providers ?? { deposits: new ManualDepositService(store_), llm: ollamaLlmProvider };
+    this.providers = providers ?? { deposits: new ManualDepositService(store_), llm: llmProvider };
   }
 
   async start(): Promise<void> {
