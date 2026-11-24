@@ -75,6 +75,23 @@ const toProductView = (item: PriceListItem): ProductView => ({
 });
 
 const OWNER_COMMANDS = ['deposit', 'deposits', 'approve', 'reject', 'saldo', 'topup', 'status'];
+
+/** Break a long list of keywords into readable menu lines. */
+const chunkKeys = (keys: string[]): string[] => {
+  const lines: string[] = [];
+  let current = '';
+  for (const key of keys) {
+    const next = current ? `${current}  ${key}` : key;
+    if (next.length > 48) {
+      if (current) lines.push(current);
+      current = key;
+    } else {
+      current = next;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+};
 const INFO_COMMANDS: Record<string, () => string> = {
   cara: howToOrder,
   syarat: terms,
@@ -272,9 +289,7 @@ export class WhatsAppClient {
       },
       {
         title: 'ᴋᴀᴛᴇɢᴏʀɪ - 🎮',
-        items: categories.slice(0, 12).map((category) => category.key).join('  ')
-          .match(/.{1,48}(\s|$)/g)?.map((chunk) => chunk.trim()) ?? [],
-        }
+        items: chunkKeys(categories.slice(0, 12).map((category) => category.key))
       },
       {
         title: 'ᴘᴀʏᴍᴇɴᴛ - 💳',
