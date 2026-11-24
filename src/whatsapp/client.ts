@@ -653,7 +653,7 @@ export class WhatsAppClient {
       const matches = filterItems(items, { query }).slice(0, 5);
       if (!matches.length) return '';
       return matches
-        .map((item) => `- ${item.name} | kode ${item.code} | Rp ${item.price.toLocaleString('id-ID')} | ${item.ready ? 'aktif' : 'gangguan'}`)
+        .map((item) => `- ${item.product_name} | kode ${item.buyer_sku_code} | Rp ${(item.price ?? 0).toLocaleString('id-ID')} | ${isActive(item) ? 'aktif' : 'gangguan'}`)
         .join('\n');
     } catch {
       return '';
