@@ -136,6 +136,9 @@ export class WhatsAppClient {
   private readonly llmLastRequest = new Map<string, number>();
   private readonly userRate = new Map<string, { count: number; windowStart: number }>();
   private readonly pendingOrders = new Map<string, { sku: string; target: string; qty: number; expiresAt: number }>();
+  private panelTimer?: ReturnType<typeof setInterval>;
+  private panelKey?: WAMessage['key'];
+  private ordersToday = 0;
   private priceCache?: { at: number; items: PriceListItem[] };
   private treeCache?: { at: number; tree: CategoryNode[] };
 
@@ -151,6 +154,7 @@ export class WhatsAppClient {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.panelTimer) clearInterval(this.panelTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.socket?.end(undefined);
     this.socket = undefined;
@@ -186,6 +190,7 @@ export class WhatsAppClient {
       clearLatestQr();
       this.logger.info('WhatsApp connected');
       eventBus.emit('status', { connected: true });
+      this.startPanel();
     }
     if (update.connection !== 'close' || this.stopping) return;
     eventBus.emit('status', { connected: false });
@@ -520,6 +525,68 @@ export class WhatsAppClient {
 
     if (llmIsEnabled() && this.shouldAnswerFreeText(message, jid, text)) {
       await this.askLlm(jid, text, name);
+    }
+  }
+
+  private startPanel(): void {
+    if ((process.env.PANEL_ENABLED ?? 'true').toLowerCase() === 'false') return;
+    const jid = (process.env.PANEL_JID ?? '').trim();
+    if (!jid) return;
+    if (this.panelTimer) clearInterval(this.panelTimer);
+    const minutes = Math.max(2, Number(process.env.PANEL_INTERVAL_MINUTES ?? 10) || 10);
+    void this.refreshPanel(jid);
+    this.panelTimer = setInterval(() => void this.refreshPanel(jid), minutes * 60_000);
+  }
+
+  /** Keeps one live status panel in the main group: delete old, send new, pin. */
+  private async refreshPanel(jid: string): Promise<void> {
+    if (!this.socket) return;
+    const clock = new Intl.DateTimeFormat('en-GB', {
+      timeZone: store.timezone, hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(new Date());
+    const seconds = Math.floor((Date.now() - this.startedAt.getTime()) / 1000);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+
+    const text = [
+      `📌〔 *${store.name.toUpperCase()} · LIVE PANEL* 〕📌`,
+      '',
+      `> Status : Online ✅`,
+      `> Uptime : ${hours}j ${minutes}m`,
+      `> Order hari ini : ${this.ordersToday}`,
+      `> Masa : ${clock} WIB`,
+      `> Model : ${process.env.LLM_MODEL ?? 'qwen2.5:0.5b'}`,
+      '',
+      `Taip apa-apa sahaja — AI faham. Cth: \`ada ml 500 tak?\``,
+      `Order: \`merlynn [kode] [target]\``,
+      '',
+      theme.line
+    ].join('\n');
+
+    try {
+      if (this.panelKey) {
+        try {
+          await this.socket.sendMessage(jid, { delete: this.panelKey });
+        } catch {
+          // panel may already be gone
+        }
+      }
+      const sent = await this.socket.sendMessage(jid, { text });
+      this.panelKey = sent?.key ?? undefined;
+      if (this.panelKey) {
+        try {
+          await this.socket.sendMessage(jid, {
+            pin: this.panelKey,
+            type: 1,
+            time: 86400
+          } as Parameters<WASocket['sendMessage']>[1]);
+        } catch {
+          // pinning is best-effort; newer clients may reject it
+        }
+      }
+      eventBus.emit('log', { level: 'info', message: 'panel refreshed' });
+    } catch (error) {
+      this.logger.warn({ error }, 'panel refresh failed');
     }
   }
 
@@ -923,6 +990,7 @@ export class WhatsAppClient {
         });
         const status = result.status.toLowerCase();
         if (status.includes('sukses') || status.includes('success')) {
+          this.ordersToday += 1;
           await this.reply(jid, orderSuccess({
             refId: result.ref_id,
             product: product.product_name,
