@@ -55,23 +55,23 @@ const prompt = (text: string): string => [
   `Ayat: ${text}`
 ].join('\n');
 
-/** Ask the LLM first, then fall back to a deterministic parser. */
+/** Deterministic parser first (fast), LLM only as a fallback. */
 export const extractOrderIntent = async (text: string, llm?: LlmProvider): Promise<OrderIntent | undefined> => {
-  if (llm) {
-    try {
-      const answer = await llm.complete({ prompt: prompt(text), context: 'intent-extraction' });
-      const json = /\{[\s\S]*\}/.exec(answer)?.[0];
-      if (json) {
-        const parsed = JSON.parse(json) as { sku?: unknown; target?: unknown; qty?: unknown };
-        const sku = typeof parsed.sku === 'string' ? parsed.sku.trim() : '';
-        const target = typeof parsed.target === 'string' ? cleanupTarget(parsed.target) : '';
-        const qtyRaw = Number(parsed.qty);
-        const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.min(qtyRaw, 10) : 1;
-        if (sku && target.length >= 5) return { sku, target, qty };
-      }
-    } catch {
-      // fall through to heuristics
-    }
+  const heuristic = heuristicIntent(text);
+  if (heuristic) return heuristic;
+  if (!llm) return undefined;
+  try {
+    const answer = await llm.complete({ prompt: prompt(text), context: 'intent-extraction' });
+    const json = /\{[\s\S]*\}/.exec(answer)?.[0];
+    if (!json) return undefined;
+    const parsed = JSON.parse(json) as { sku?: unknown; target?: unknown; qty?: unknown };
+    const sku = typeof parsed.sku === 'string' ? parsed.sku.trim() : '';
+    const target = typeof parsed.target === 'string' ? cleanupTarget(parsed.target) : '';
+    const qtyRaw = Number(parsed.qty);
+    const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.min(qtyRaw, 10) : 1;
+    if (sku && target.length >= 5) return { sku, target, qty };
+  } catch {
+    return undefined;
   }
-  return heuristicIntent(text);
+  return undefined;
 };
