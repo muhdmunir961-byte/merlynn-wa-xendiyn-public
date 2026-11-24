@@ -18,7 +18,22 @@ const digiflazz = config.digiflazzUsername && config.digiflazzApiKey
     })
   : undefined;
 
-const health = await startHealthServer({ secret: config.digiflazzWebhookSecret });
+const health = await startHealthServer({
+  secret: config.digiflazzWebhookSecret,
+  onEvent: (event, payload) => {
+    const data = payload as { data?: Record<string, unknown> } | undefined;
+    const row = data?.data ?? {};
+    void client.reportWebhookEvent(event, {
+      refId: typeof row.ref_id === 'string' ? row.ref_id : undefined,
+      status: typeof row.status === 'string' ? row.status : undefined,
+      product: typeof row.product_name === 'string' ? row.product_name : undefined,
+      customer: typeof row.customer_no === 'string' ? row.customer_no : undefined,
+      serial: typeof row.sn === 'string' ? row.sn : undefined,
+      price: typeof row.price === 'number' ? row.price : undefined,
+      message: typeof row.message === 'string' ? row.message : undefined
+    });
+  }
+});
 const client = new WhatsAppClient(store, {
   deposits: new ManualDepositService(store),
   llm: llmProvider,

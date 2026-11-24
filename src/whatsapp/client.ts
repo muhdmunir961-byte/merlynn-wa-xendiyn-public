@@ -820,6 +820,38 @@ export class WhatsAppClient {
     }
   }
 
+  /** Digiflazz webhook → notify the owner group so status changes reach buyers. */
+  async reportWebhookEvent(
+    event: string,
+    data: { refId?: string; status?: string; product?: string; customer?: string; serial?: string; price?: number; message?: string }
+  ): Promise<void> {
+    const target = (process.env.PANEL_JID ?? '').trim();
+    if (!target || !this.socket) return;
+    const status = (data.status ?? '').toLowerCase();
+    const head = status.includes('sukses') || status.includes('success')
+      ? '✅ Update Transaksi'
+      : status.includes('gagal') || status.includes('fail')
+        ? '⚠️ Update Transaksi'
+        : '⏳ Update Transaksi';
+    const lines = [
+      `${head} (${event})`,
+      '',
+      data.product ? `> Produk : ${data.product}` : '',
+      data.customer ? `> Tujuan : ${data.customer}` : '',
+      data.refId ? `> Ref : \`${data.refId}\`` : '',
+      data.status ? `> Status : ${data.status}` : '',
+      data.serial ? `> SN : \`${data.serial}\`` : '',
+      data.price ? `> Harga : Rp ${data.price.toLocaleString('id-ID')}` : '',
+      data.message ? `> Pesan : ${oneLine(data.message)}` : ''
+    ].filter(Boolean);
+    try {
+      await this.sendText(target, lines.join('\n'));
+      eventBus.emit('order', { jid: target, refId: data.refId, status: data.status, product: data.product, target: data.customer });
+    } catch (error) {
+      this.logger.warn({ error }, 'webhook notify failed');
+    }
+  }
+
   private isOwnerNow(jid: string, senderJid: string): boolean {
     return jid.endsWith('@g.us') && this.store_.getOwner(jid)?.jid === senderJid;
   }

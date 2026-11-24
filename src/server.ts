@@ -6,7 +6,7 @@ import QRCode from 'qrcode';
 import { config } from './config.js';
 import { getLatestQr } from './whatsapp/qr-store.js';
 
-type WebhookOptions = { secret?: string };
+type WebhookOptions = { secret?: string; onEvent?: (event: string, payload: unknown) => void };
 
 const signatureMatches = (rawBody: Buffer, signature: string, secret: string): boolean => {
   const normalized = signature.trim();
@@ -51,10 +51,17 @@ export async function startHealthServer(options: WebhookOptions = {}): Promise<F
     if (!signature || !signatureMatches(body, signature, secret)) {
       return reply.code(401).send({ ok: false, error: 'Invalid webhook signature.' });
     }
+    const event = String(request.headers['x-digiflazz-event'] ?? 'update');
+    let payload: unknown;
     try {
-      JSON.parse(body.toString('utf8'));
+      payload = JSON.parse(body.toString('utf8'));
     } catch {
       return reply.code(400).send({ ok: false, error: 'Invalid JSON webhook body.' });
+    }
+    try {
+      options.onEvent?.(event, payload);
+    } catch (error) {
+      request.log.warn({ error }, 'webhook handler failed');
     }
     return reply.code(202).send({ ok: true });
   });
