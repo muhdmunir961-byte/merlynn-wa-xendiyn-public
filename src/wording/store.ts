@@ -32,6 +32,12 @@ export interface WordingOverride {
   greeting?: string;
 }
 
+export interface Category {
+  key: string;
+  label: string;
+  needles: string[];
+}
+
 /** Runtime wording set by the owner via chat; overrides env defaults. */
 let wordingOverride: WordingOverride = {};
 

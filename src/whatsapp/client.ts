@@ -639,7 +639,7 @@ export class WhatsAppClient {
           await this.socket.sendMessage(jid, {
             pin: this.panelKey,
             type: 1,
-            time: 21600
+            time: 86400
           } as Parameters<WASocket['sendMessage']>[1]);
         } catch {
           // pinning is best-effort; newer clients may reject it
@@ -725,7 +725,7 @@ export class WhatsAppClient {
       const [label, ...rest] = part.split(':');
       const value = rest.join(':').trim();
       if (!value) continue;
-      const key = label.trim().toLowerCase();
+      const key = (label ?? '').trim().toLowerCase();
       if (['nama', 'name'].includes(key)) patch.name = value.slice(0, 60);
       else if (['tagline', 'slogan'].includes(key)) patch.tagline = value.slice(0, 120);
       else if (['salam', 'greeting'].includes(key)) patch.greeting = value.slice(0, 60);

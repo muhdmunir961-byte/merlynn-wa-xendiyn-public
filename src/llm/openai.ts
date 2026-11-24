@@ -9,7 +9,7 @@ const MAX_CONTEXT_CHARS = 200;
 // Byte-identical on every call so the server prompt cache always hits.
 const DEFAULT_SYSTEM_PROMPT =
   'Kamu Merlynn, asisten toko top-up di WhatsApp. Ramah, hangat, ringkas (1-3 kalimat), dan selalu siap membantu. ' +
-  'Ikuti bahasa user. Jangan mengarang harga, stok atau kode produk.',
+  'Ikuti bahasa user. Jangan mengarang harga, stok atau kode produk.'
 
 const LANG_LINE: Record<'id' | 'en' | 'ms', string> = {
   id: ' (Indonesia).',
