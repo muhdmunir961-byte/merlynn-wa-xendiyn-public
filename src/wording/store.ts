@@ -452,3 +452,60 @@ export const usage = {
 };
 
 export const helpFooter = (): string => `Hubungi ${store.ownerName} untuk bantuan lanjut.`;
+
+export interface CategoryLine {
+  key: string;
+  label: string;
+  total: number;
+  active: number;
+  inactive: number;
+}
+
+const statusBadge = (active: number, inactive: number): string =>
+  inactive === 0 ? 'Aktif penuh ✅' : active === 0 ? 'Nonaktif ⛔' : `${active} aktif / ${inactive} nonaktif ⚠️`;
+
+export const categoryOverview = (senderName: string, lines: CategoryLine[]): string => {
+  const body = lines.map((line) =>
+    `   ${theme.bullet} *${line.label}* — ${line.total} produk · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``);
+
+  return [
+    greetingHeader(senderName),
+    '',
+    '      ⤿ ֵ ˳  ᴋᴀᴛᴇɢᴏʀɪ',
+    theme.soft,
+    ...body,
+    '',
+    'Ketik nama kategori untuk lihat subkategori.',
+    `Contoh: \`ml\` · \`pln\` · \`pulsa\``,
+    '',
+    theme.footer.replace('%STORE%', store.name)
+  ].join('\n');
+};
+
+export interface SubCategoryLine {
+  key: string;
+  label: string;
+  total: number;
+  active: number;
+  inactive: number;
+}
+
+export const subcategoryOverview = (category: { label: string; total: number; active: number; inactive: number }, lines: SubCategoryLine[]): string => [
+  `───═[ *${category.label.toUpperCase()}* ]═───`,
+  '',
+  `> Jumlah : ${category.total} produk`,
+  `> Status : ${statusBadge(category.active, category.inactive)}`,
+  '',
+  theme.soft,
+  ...lines.map((line) => `   ${theme.bullet} ${line.label} — ${line.total} produk · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``),
+  '',
+  'Ketik subkategori untuk lihat produk.',
+  `Tapis: \`${store.prefix}aktif ${category.label}\` atau \`${store.prefix}nonaktif ${category.label}\``
+].join('\n');
+
+export const filterNotice = (mode: 'all' | 'active' | 'inactive', label: string): string =>
+  mode === 'active'
+    ? `✅ Menunjuk produk *aktif* sahaja untuk ${label}.`
+    : mode === 'inactive'
+      ? `⛔ Menunjuk produk *nonaktif/gangguan* untuk ${label}.`
+      : `📦 Semua produk untuk ${label}.`;

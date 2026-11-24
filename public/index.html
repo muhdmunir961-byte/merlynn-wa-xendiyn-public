@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Merlynn Terminal</title>
+<style>
+  :root { color-scheme: dark; --bg:#0A0A0A; --card:#0f141a; --line:#1e293b; --accent:#38bdf8; --dim:#64748b; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:#cbd5e1; font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:14px; letter-spacing:.12em; color:var(--accent); text-transform:uppercase; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--err); }
+  .dot.on { background:var(--ok); }
+  .wrap { display:grid; grid-template-columns: 1.15fr .85fr; gap:14px; padding:14px 18px 28px; }
+  @media (max-width: 880px) { .wrap { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card h2 { margin:0 0 10px; font-size:11px; letter-spacing:.14em; color:var(--dim); text-transform:uppercase; }
+  #log { height:320px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
+  .row { display:flex; gap:8px; }
+  .t { color:var(--dim); flex:0 0 auto; }
+  .msg { word-break:break-word; }
+  .msg.in { color:#e2e8f0; } .msg.out { color:var(--accent); } .msg.warn { color:var(--warn); } .msg.err { color:var(--err); }
+  canvas { width:100%; height:120px; display:block; background:#070a0d; border:1px solid var(--line); border-radius:8px; }
+  .stats { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-top:10px; }
+  .stat { border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .stat span { display:block; color:var(--dim); font-size:10px; letter-spacing:.1em; text-transform:uppercase; }
+  .stat b { font-size:16px; color:#e2e8f0; font-weight:600; }
+  form { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+  input { background:#070a0d; border:1px solid var(--line); color:#e2e8f0; border-radius:8px; padding:9px 10px; font:inherit; }
+  button { background:var(--accent); color:#04121b; border:0; border-radius:8px; padding:9px 12px; font:inherit; font-weight:700; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--dim); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>Merlynn Terminal</h1>
+  <span class="hint" id="conn">connecting…</span>
+</header>
+
+<div class="wrap">
+  <section class="card">
+    <h2>Live feed</h2>
+    <div id="log"></div>
+    <div class="stats">
+      <div class="stat"><span>Messages in</span><b id="s-in">0</b></div>
+      <div class="stat"><span>Replies out</span><b id="s-out">0</b></div>
+      <div class="stat"><span>Orders</span><b id="s-order">0</b></div>
+      <div class="stat"><span>Latency</span><b id="s-lat">—</b></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Signal</h2>
+    <canvas id="viz"></canvas>
+    <form id="form">
+      <input id="jid" placeholder="jid: 1234567890-123456@g.us" autocomplete="off" />
+      <input id="text" placeholder="message to send from the bot" autocomplete="off" />
+      <button id="send">Send via bot</button>
+      <div class="hint">Dashboard -> bot -> WhatsApp. Watch the feed for events.</div>
+    </form>
+  </section>
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+const dot = document.getElementById('dot');
+const conn = document.getElementById('conn');
+const counters = { in: 0, out: 0, order: 0 };
+let lastAt = 0;
+
+const addRow = (kind, text) => {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = new Date().toLocaleTimeString('en-GB');
+  const m = document.createElement('span');
+  m.className = 'msg ' + kind;
+  m.textContent = text;
+  row.append(t, m);
+  logEl.append(row);
+  logEl.scrollTop = logEl.scrollHeight;
+  while (logEl.childElementCount > 300) logEl.firstElementChild.remove();
+};
+
+const setStat = (id, value) => { document.getElementById(id).textContent = value; };
+
+const token = new URLSearchParams(location.search).get('token') ?? '';
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (token ? '?token=' + encodeURIComponent(token) : '');
+let socket;
+let retry = 0;
+
+const connect = () => {
+  socket = new WebSocket(wsUrl);
+  socket.onopen = () => {
+    dot.classList.add('on');
+    conn.textContent = 'live';
+    retry = 0;
+    addRow('out', 'gateway connected');
+  };
+  socket.onclose = () => {
+    dot.classList.remove('on');
+    conn.textContent = 'reconnecting…';
+    retry = Math.min(retry + 1, 6);
+    setTimeout(connect, 500 * retry);
+  };
+  socket.onmessage = (event) => {
+    let frame;
+    try { frame = JSON.parse(event.data); } catch { return; }
+    if (frame.type === 'pong') return;
+    const payload = frame.payload ?? {};
+    if (frame.type === 'status') { addRow('out', 'status: ' + (payload.connected ? 'online' : 'offline')); return; }
+    if (frame.type === 'message') {
+      counters.in += 1; setStat('s-in', counters.in);
+      addRow('in', (payload.name || payload.sender) + ': ' + payload.text);
+      pulse(1);
+      return;
+    }
+    if (frame.type === 'reply') {
+      counters.out += 1; setStat('s-out', counters.out);
+      addRow('out', 'bot: ' + payload.text.split('\n')[0].slice(0, 120));
+      return;
+    }
+    if (frame.type === 'order') {
+      counters.order += 1; setStat('s-order', counters.order);
+      addRow('in', 'order ' + payload.status + ': ' + payload.product + ' -> ' + payload.target);
+      pulse(2);
+      return;
+    }
+    if (frame.type === 'log') {
+      const level = payload.level === 'error' ? 'err' : payload.level === 'warn' ? 'warn' : 'out';
+      addRow(level, payload.message);
+    }
+  };
+};
+
+// Canvas visualiser
+const canvas = document.getElementById('viz');
+const ctx = canvas.getContext('2d');
+const bars = new Array(48).fill(0);
+let energy = 0.12;
+
+const pulse = (amount) => { energy = Math.min(1.6, energy + amount); };
+
+const draw = () => {
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
+    canvas.width = width * ratio;
+    canvas.height = height * ratio;
+  }
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  bars.forEach((_, index) => {
+    const target = energy * (0.35 + Math.random() * 0.9);
+    bars[index] = bars[index] * 0.82 + target * 0.18;
+  });
+  energy = Math.max(0.08, energy * 0.965);
+
+  const barWidth = width / bars.length;
+  bars.forEach((value, index) => {
+    const barHeight = Math.min(height - 6, value * height);
+    const x = index * barWidth + 1;
+    const gradient = ctx.createLinearGradient(0, height - barHeight, 0, height);
+    gradient.addColorStop(0, '#38bdf8');
+    gradient.addColorStop(1, 'rgba(56,189,248,0.12)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(x, height - barHeight, barWidth - 2, barHeight);
+  });
+
+  requestAnimationFrame(draw);
+};
+draw();
+
+// Simple latency meter driven by ping round trip
+setInterval(() => {
+  if (!socket || socket.readyState !== 1) return;
+  lastAt = performance.now();
+  socket.send(JSON.stringify({ type: 'ping' }));
+}, 5000);
+
+const originalOnMessage = (event) => {};
+socket && (socket.onmessage = socket.onmessage);
+
+const form = document.getElementById('form');
+const send = document.getElementById('send');
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const jid = document.getElementById('jid').value.trim();
+  const text = document.getElementById('text').value.trim();
+  if (!jid || !text || !socket || socket.readyState !== 1) return;
+  socket.send(JSON.stringify({ type: 'broadcast', jid, text }));
+  document.getElementById('text').value = '';
+  addRow('out', 'sending…');
+});
+
+// latency display
+const tick = setInterval(() => {
+  if (!lastAt) return;
+  setStat('s-lat', Math.round(performance.now() - lastAt) + ' ms');
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

@@ -1,4 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import QRCode from 'qrcode';
 import { config } from './config.js';
@@ -21,6 +23,16 @@ export async function startHealthServer(options: WebhookOptions = {}): Promise<F
   const app = Fastify({ logger: { level: config.logLevel } });
   app.addContentTypeParser('*', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
   app.get('/health', async () => ({ ok: true, service: 'merlynn-wa-xendiyn' }));
+
+  const dashboardPath = join(process.cwd(), 'public', 'index.html');
+  app.get('/dashboard', async (_request, reply) => {
+    try {
+      const html = await readFile(dashboardPath, 'utf8');
+      return reply.type('text/html').send(html);
+    } catch {
+      return reply.code(404).send({ ok: false, error: 'dashboard not found' });
+    }
+  });
 
   app.get('/qr', async (_request, reply) => {
     const qr = getLatestQr();

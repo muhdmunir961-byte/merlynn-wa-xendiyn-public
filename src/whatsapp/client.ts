@@ -19,15 +19,18 @@ import type { LlmProvider } from '../plugins/interfaces.js';
 import { OutgoingQueue } from './queue.js';
 import { loadAuth } from './auth.js';
 import { theme } from '../wording/theme.js';
+import { buildTree, filterItems, isActive, resolveNode, type CategoryNode } from '../catalog/tree.js';
+import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
+import { eventBus } from '../server/event-bus.js';
 import {
   balanceInfo,
+  categoryOverview,
   catalogue,
-  categories,
   depositCreated,
   depositList,
   depositReviewed,
   errors,
-  findCategory,
+  filterNotice,
   howToOrder,
   menu,
   newRefId,
@@ -40,6 +43,7 @@ import {
   productList,
   staffInfo,
   store,
+  subcategoryOverview,
   terms,
   uptimeInfo,
   usage,
@@ -53,6 +57,8 @@ interface ClientProviders {
   llm: LlmProvider;
   digiflazz?: DigiflazzClient;
 }
+
+type FilterMode = 'all' | 'active' | 'inactive';
 
 const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const llmIsEnabled = (): boolean => ['true', '1', 'yes'].includes((process.env.LLM_ENABLED ?? '').trim().toLowerCase());
@@ -71,12 +77,19 @@ const toProductView = (item: PriceListItem): ProductView => ({
   code: item.buyer_sku_code,
   name: item.product_name,
   price: item.price,
-  ready: Boolean(item.seller_product_status) && Boolean(item.buyer_product_status)
+  ready: isActive(item)
 });
 
 const OWNER_COMMANDS = ['deposit', 'deposits', 'approve', 'reject', 'saldo', 'topup', 'status'];
+const INFO_COMMANDS: Record<string, () => string> = {
+  cara: howToOrder,
+  syarat: terms,
+  rules: terms,
+  owner: staffInfo,
+  staff: staffInfo,
+  pay: paymentInfo
+};
 
-/** Break a long list of keywords into readable menu lines. */
 const chunkKeys = (keys: string[]): string[] => {
   const lines: string[] = [];
   let current = '';
@@ -92,13 +105,17 @@ const chunkKeys = (keys: string[]): string[] => {
   if (current) lines.push(current);
   return lines;
 };
-const INFO_COMMANDS: Record<string, () => string> = {
-  cara: howToOrder,
-  syarat: terms,
-  rules: terms,
-  owner: staffInfo,
-  staff: staffInfo,
-  pay: paymentInfo
+
+const messageText = (message: WAMessage): string | undefined => {
+  const content = message.message;
+  if (!content) return undefined;
+  const direct = content.conversation ?? content.extendedTextMessage?.text;
+  if (direct) return direct;
+  const listReply = content.listResponseMessage?.singleSelectReply?.selectedRowId;
+  if (listReply) return rowIdToCommand(listReply, store.prefix);
+  const buttonReply = content.buttonsResponseMessage?.selectedButtonId;
+  if (buttonReply) return rowIdToCommand(buttonReply, store.prefix);
+  return undefined;
 };
 
 export class WhatsAppClient {
@@ -114,6 +131,7 @@ export class WhatsAppClient {
   private readonly llmLastRequest = new Map<string, number>();
   private readonly userRate = new Map<string, { count: number; windowStart: number }>();
   private priceCache?: { at: number; items: PriceListItem[] };
+  private treeCache?: { at: number; tree: CategoryNode[] };
 
   constructor(private readonly store_: JsonStore, providers?: ClientProviders) {
     this.providers = providers ?? { deposits: new ManualDepositService(store_), llm: ollamaLlmProvider };
@@ -130,6 +148,10 @@ export class WhatsAppClient {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.socket?.end(undefined);
     this.socket = undefined;
+  }
+
+  getSocket(): WASocket | undefined {
+    return this.socket;
   }
 
   private connect(state: AuthenticationState): void {
@@ -157,8 +179,10 @@ export class WhatsAppClient {
     if (update.connection === 'open') {
       clearLatestQr();
       this.logger.info('WhatsApp connected');
+      eventBus.emit('status', { connected: true });
     }
     if (update.connection !== 'close' || this.stopping) return;
+    eventBus.emit('status', { connected: false });
     const statusCode = (update.lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
     if (statusCode === DisconnectReason.loggedOut) {
       this.logger.error('WhatsApp logged out; remove auth_info and re-authenticate if intentional');
@@ -190,24 +214,30 @@ export class WhatsAppClient {
       return false;
     }
     entry.count += 1;
-    return entry.count > limit;
+    if (entry.count > limit) {
+      eventBus.emit('log', { level: 'warn', message: `rate limit hit for ${jid}` });
+      return true;
+    }
+    return false;
   }
 
   private async handleMessage(message: WAMessage): Promise<void> {
     const remoteJid = message.key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast' || message.key.fromMe) return;
-    const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text;
+    const text = messageText(message);
     if (!text) return;
     if (this.rateLimited(remoteJid)) return;
 
     const senderJid = message.key.participant ?? remoteJid;
     const name = displayName(message, senderJid);
+    eventBus.emit('message', { jid: remoteJid, sender: senderJid, name, text, at: Date.now() });
+
     const command = parseCommand(text, config.commandPrefix) ?? parseOrder(text, store.keyword);
 
     if (!command) {
-      const category = findCategory(text.trim());
-      if (category) {
-        await this.price(remoteJid, category.label, category.needles);
+      const node = await this.resolveInput(text);
+      if (node) {
+        await this.browseNode(remoteJid, node.category, node.subcategory?.key, 'all');
         return;
       }
       if (llmIsEnabled()) await this.askLlm(remoteJid, text, name);
@@ -222,13 +252,11 @@ export class WhatsAppClient {
     switch (command.name) {
       case 'menu':
       case 'help':
-        await this.reply(remoteJid, this.menuText(name));
+        await this.sendMenu(remoteJid, name);
         return;
-      case 'ping': {
-        const replyMs = Date.now();
-        await this.reply(remoteJid, `🏓 Pong! Bot aktif.\n> ${new Date(replyMs).toISOString()}`);
+      case 'ping':
+        await this.reply(remoteJid, `🏓 Pong! Bot aktif.\n> ${new Date().toISOString()}`);
         return;
-      }
       case 'uptime':
       case 'statusbot':
         await this.reply(remoteJid, uptimeInfo(Date.now() - this.startedAt.getTime(), this.startedAt.toISOString(), theme.name));
@@ -245,13 +273,32 @@ export class WhatsAppClient {
       case 'cat':
       case 'catalog':
       case 'list':
-        await this.catalogue(remoteJid, name);
+      case 'kategori':
+        await this.showCategories(remoteJid, name);
         return;
+      case 'aktif':
+      case 'active':
+      case 'nonaktif':
+      case 'inactive': {
+        const mode: FilterMode = command.name === 'aktif' || command.name === 'active' ? 'active' : 'inactive';
+        const target = command.args.join(' ');
+        const node = target ? await this.resolveInput(target) : undefined;
+        if (node) {
+          await this.browseNode(remoteJid, node.category, node.subcategory?.key, mode);
+          return;
+        }
+        await this.showCategories(remoteJid, name, mode);
+        return;
+      }
       case 'price':
       case 'harga': {
-        const query = command.args.join(' ');
-        const category = findCategory(query.trim().split(/\s+/)[0] ?? '');
-        await this.price(remoteJid, query, category?.needles ?? (query ? [query] : undefined));
+        const target = command.args.join(' ');
+        const node = target ? await this.resolveInput(target) : undefined;
+        if (node) {
+          await this.browseNode(remoteJid, node.category, node.subcategory?.key, 'all');
+          return;
+        }
+        await this.searchPrice(remoteJid, target);
         return;
       }
       case 'order':
@@ -262,9 +309,9 @@ export class WhatsAppClient {
         await this.order(remoteJid, command.args);
         return;
       default: {
-        const category = findCategory(command.name);
-        if (category) {
-          await this.price(remoteJid, category.label, category.needles);
+        const node = await this.resolveInput(command.name);
+        if (node) {
+          await this.browseNode(remoteJid, node.category, node.subcategory?.key, 'all');
           return;
         }
         if (OWNER_COMMANDS.includes(command.name)) {
@@ -277,19 +324,165 @@ export class WhatsAppClient {
     }
   }
 
-  private menuText(name: string): string {
+  private async priceItems(): Promise<PriceListItem[]> {
+    if (!this.providers.digiflazz) throw new Error('Digiflazz belum dikonfigurasi');
+    const cached = this.priceCache;
+    if (cached && Date.now() - cached.at < PRICE_CACHE_TTL_MS) return cached.items;
+    const items = await this.providers.digiflazz.getPriceList();
+    this.priceCache = { at: Date.now(), items };
+    this.treeCache = { at: Date.now(), tree: buildTree(items) };
+    return items;
+  }
+
+  private async categoryTree(): Promise<CategoryNode[]> {
+    const cached = this.treeCache;
+    if (cached && Date.now() - cached.at < PRICE_CACHE_TTL_MS) return cached.tree;
+    const items = await this.priceItems();
+    const tree = buildTree(items);
+    this.treeCache = { at: Date.now(), tree };
+    return tree;
+  }
+
+  private async resolveInput(input: string): Promise<{ category: CategoryNode; subcategory?: { key: string } } | undefined> {
+    if (!this.providers.digiflazz || !input.trim()) return undefined;
+    try {
+      const tree = await this.categoryTree();
+      return resolveNode(tree, input);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async showCategories(jid: string, name: string, mode: FilterMode = 'all'): Promise<void> {
+    if (!this.providers.digiflazz) {
+      await this.reply(jid, errors.digiflazzMissing());
+      return;
+    }
+    try {
+      const tree = await this.categoryTree();
+      const lines = tree.map((category) => ({
+        key: category.key,
+        label: category.label,
+        total: mode === 'active' ? category.active : mode === 'inactive' ? category.inactive : category.total,
+        active: category.active,
+        inactive: category.inactive
+      })).filter((line) => line.total > 0);
+
+      await sendList(this.socket!, jid, {
+        title: `${store.name} · Kategori`,
+        text: categoryOverview(name, lines),
+        footer: theme.name,
+        buttonText: 'Pilih Kategori',
+        sections: [{
+          title: 'Kategori Produk',
+          rows: lines.slice(0, 10).map((line) => ({
+            title: line.label,
+            description: `${line.total} produk`,
+            rowId: `cat:${line.key}`
+          }))
+        }],
+        fallback: categoryOverview(name, lines)
+      });
+    } catch (error) {
+      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
+    }
+  }
+
+  private async browseNode(jid: string, category: CategoryNode, subKey?: string, mode: FilterMode = 'all'): Promise<void> {
+    try {
+      const items = await this.priceItems();
+      if (!subKey) {
+        const lines = category.subcategories.map((sub) => ({
+          key: sub.key,
+          label: sub.label,
+          total: mode === 'active' ? sub.active : mode === 'inactive' ? sub.inactive : sub.total,
+          active: sub.active,
+          inactive: sub.inactive
+        })).filter((line) => line.total > 0);
+
+        const text = subcategoryOverview(category, lines);
+        await sendList(this.socket!, jid, {
+          title: category.label,
+          text,
+          footer: theme.name,
+          buttonText: 'Pilih Subkategori',
+          sections: [{
+            title: 'Subkategori',
+            rows: lines.slice(0, 10).map((line) => ({
+              title: line.label,
+              description: `${line.total} produk`,
+              rowId: `sub:${line.key}`
+            }))
+          }],
+          fallback: text
+        });
+        return;
+      }
+
+      const matches = filterItems(items, { categoryKey: category.key, subKey, mode });
+      const label = category.subcategories.find((sub) => sub.key === subKey)?.label ?? category.label;
+
+      if (!matches.length) {
+        await this.reply(jid, [
+          noProducts(label),
+          '',
+          filterNotice(mode, label)
+        ].join('\n'));
+        return;
+      }
+
+      const shown = matches.slice(0, 10);
+      await this.reply(jid, [
+        filterNotice(mode, label),
+        '',
+        productList(label, shown.map(toProductView), store.keyword)
+      ].join('\n'));
+
+      if (matches.length > shown.length) {
+        await this.reply(jid, `ℹ️ Ada ${matches.length} produk untuk *${label}*. Ketik \`${store.prefix}aktif ${label}\` untuk tapis produk aktif.`);
+      }
+    } catch (error) {
+      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
+    }
+  }
+
+  private async searchPrice(jid: string, query: string): Promise<void> {
+    if (!this.providers.digiflazz) {
+      await this.reply(jid, errors.digiflazzMissing());
+      return;
+    }
+    try {
+      const items = await this.priceItems();
+      const matches = query ? filterItems(items, { query }) : items;
+      if (!matches.length) {
+        await this.reply(jid, noProducts(query));
+        return;
+      }
+      const shown = matches.slice(0, 10);
+      const label = query || 'semua produk';
+      await this.reply(jid, productList(label, shown.map(toProductView), store.keyword));
+      if (matches.length > shown.length) {
+        await this.reply(jid, `ℹ️ Ada ${matches.length} produk. Guna kata kunci lebih spesifik.`);
+      }
+    } catch (error) {
+      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
+    }
+  }
+
+  private async sendMenu(jid: string, name: string): Promise<void> {
     const sections: MenuSection[] = [
       {
         title: 'ᴄᴀᴛᴀʟᴏɢᴜᴇ - だ !',
         items: [
-          `${store.prefix}list — ringkasan semua produk`,
+          `${store.prefix}kategori — senarai kategori & status`,
+          `${store.prefix}aktif / ${store.prefix}nonaktif [kategori] — tapis`,
           `${store.prefix}price [kata kunci] — cari produk`,
           `${store.keyword} [kode] [target] — order terus`
         ]
       },
       {
         title: 'ᴋᴀᴛᴇɢᴏʀɪ - 🎮',
-        items: chunkKeys(categories.slice(0, 12).map((category) => category.key))
+        items: chunkKeys(['ml', 'ff', 'pubg', 'codm', 'genshin', 'hok', 'valorant', 'roblox', 'starlight', 'steam', 'gplay', 'pln', 'pulsa', 'data', 'emoney'])
       },
       {
         title: 'ᴘᴀʏᴍᴇɴᴛ - 💳',
@@ -319,7 +512,25 @@ export class WhatsAppClient {
       }
     ];
 
-    return [menu(name, sections.filter((section) => section.items.length)), '', `Style: ${theme.name}`].join('\n');
+    const text = [menu(name, sections.filter((section) => section.items.length)), '', `Style: ${theme.name}`].join('\n');
+
+    await sendList(this.socket!, jid, {
+      title: store.name,
+      text,
+      footer: theme.name,
+      buttonText: 'Buka Menu',
+      sections: [{
+        title: 'Menu Utama',
+        rows: [
+          { title: 'Kategori Produk', description: 'Lihat semua kategori', rowId: 'cmd:kategori' },
+          { title: 'Cara Order', description: 'Panduan order', rowId: 'cmd:cara' },
+          { title: 'Pembayaran', description: 'Info deposit & e-wallet', rowId: 'cmd:pay' },
+          { title: 'Terma', description: 'Syarat & peraturan', rowId: 'cmd:syarat' },
+          { title: 'Owner', description: 'Hubungi owner', rowId: 'cmd:owner' }
+        ]
+      }],
+      fallback: text
+    });
   }
 
   private async claimOwner(groupJid: string, senderJid: string): Promise<void> {
@@ -351,15 +562,6 @@ export class WhatsAppClient {
     if (this.isOwnerNow(jid, senderJid)) return true;
     await this.reply(jid, errors.ownerOnly());
     return false;
-  }
-
-  private async priceItems(): Promise<PriceListItem[]> {
-    if (!this.providers.digiflazz) throw new Error('Digiflazz belum dikonfigurasi');
-    const cached = this.priceCache;
-    if (cached && Date.now() - cached.at < PRICE_CACHE_TTL_MS) return cached.items;
-    const items = await this.providers.digiflazz.getPriceList();
-    this.priceCache = { at: Date.now(), items };
-    return items;
   }
 
   private async ownerCommand(jid: string, ownerJid: string, name: string, args: string[]): Promise<void> {
@@ -486,7 +688,7 @@ export class WhatsAppClient {
         await this.reply(jid, noProducts(code));
         return;
       }
-      if (!product.seller_product_status || !product.buyer_product_status) {
+      if (!isActive(product)) {
         await this.reply(jid, orderFailed({
           refId: '-',
           product: product.product_name,
@@ -509,6 +711,9 @@ export class WhatsAppClient {
           sku: product.buyer_sku_code,
           customer: target,
           refId
+        });
+        eventBus.emit('order', {
+          jid, refId: result.ref_id, status: result.status, product: product.product_name, target: result.customer_no
         });
         const status = result.status.toLowerCase();
         if (status.includes('sukses') || status.includes('success')) {
@@ -543,56 +748,6 @@ export class WhatsAppClient {
     }
   }
 
-  private async catalogue(jid: string, senderName: string): Promise<void> {
-    if (!this.providers.digiflazz) {
-      await this.reply(jid, errors.digiflazzMissing());
-      return;
-    }
-    try {
-      const items = await this.priceItems();
-      const counts = new Map<string, number>();
-      for (const item of items) {
-        const brand = (item.brand || item.category || 'lain').trim();
-        counts.set(brand, (counts.get(brand) ?? 0) + 1);
-      }
-      const summaries: BrandSummary[] = [...counts.entries()]
-        .map(([brand, count]) => ({ brand, count }))
-        .sort((a, b) => b.count - a.count);
-      await this.reply(jid, catalogue(summaries, senderName));
-    } catch (error) {
-      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
-    }
-  }
-
-  private async price(jid: string, label: string, needles?: string[]): Promise<void> {
-    if (!this.providers.digiflazz) {
-      await this.reply(jid, errors.digiflazzMissing());
-      return;
-    }
-    try {
-      const items = await this.priceItems();
-      const normalized = (needles ?? []).map((needle) => needle.toLowerCase()).filter(Boolean);
-      const matches = normalized.length
-        ? items.filter((item) => normalized.some((needle) =>
-            [item.buyer_sku_code, item.product_name, item.brand, item.category]
-              .some((value) => value.toLowerCase().includes(needle))))
-        : items;
-
-      if (!matches.length) {
-        await this.reply(jid, noProducts(label));
-        return;
-      }
-
-      const shown = matches.slice(0, 10);
-      await this.reply(jid, productList(label, shown.map(toProductView), store.keyword));
-      if (matches.length > shown.length) {
-        await this.reply(jid, `ℹ️ Ada ${matches.length} produk untuk *${label}*. Guna kata kunci lebih spesifik, cth \`${store.prefix}price ${label} 100\`.`);
-      }
-    } catch (error) {
-      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
-    }
-  }
-
   private async askLlm(jid: string, prompt: string, name: string): Promise<void> {
     if (!prompt.trim()) {
       await this.reply(jid, errors.usage(usage.ai));
@@ -624,12 +779,18 @@ export class WhatsAppClient {
     }
   }
 
+  /** Used by the web dashboard to send a message through the bot. */
+  async sendText(jid: string, text: string): Promise<void> {
+    await this.reply(jid, text);
+  }
+
   private async reply(jid: string, text: string): Promise<void> {
     await this.queue.enqueue(async () => {
       if (!this.socket) return;
       await this.socket.sendPresenceUpdate('composing', jid);
       await this.socket.sendMessage(jid, { text });
       await this.socket.sendPresenceUpdate('paused', jid);
+      eventBus.emit('reply', { jid, text, at: Date.now() });
     });
   }
 }
