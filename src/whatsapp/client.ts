@@ -1174,14 +1174,11 @@ export class WhatsAppClient {
     const history = this.histories.get(jid) ?? [];
     try {
       const remembered = await memoryContext(prompt);
-      const catalogue = await this.productContext(prompt);
       const answer = await this.providers.llm.complete({
         prompt,
         context: [
-          `Pelanggan: ${name}`,
-          ...(catalogue ? [`Produk sebenar dari katalog:\n${catalogue}`] : []),
-          ...(remembered ? [`Memori:\n${remembered}`] : []),
-          ...history
+          ...(remembered ? [remembered.slice(0, 120)] : []),
+          ...history.slice(-2)
         ].join('\n')
       });
       const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]
@@ -1189,7 +1186,12 @@ export class WhatsAppClient {
       this.histories.set(jid, next);
       await this.reply(jid, answer);
     } catch (error) {
-      await this.reply(jid, errors.aiFailed(error instanceof Error ? error.message : 'request gagal'));
+      const message = error instanceof Error ? error.message : 'request gagal';
+      if (message === 'DEADLINE') {
+        await this.reply(jid, tr('error.aiSlow'));
+        return;
+      }
+      await this.reply(jid, errors.aiFailed(message));
     }
   }
 

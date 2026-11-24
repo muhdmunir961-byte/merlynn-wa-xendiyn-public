@@ -4,25 +4,16 @@ const env = (key: string, fallback = ''): string => (process.env[key] ?? fallbac
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_PROMPT_CHARS = 6_000;
-const MAX_CONTEXT_CHARS = 2_000;
+const MAX_CONTEXT_CHARS = 200;
 
-const DEFAULT_SYSTEM_PROMPT = [
-  'Kamu ialah Merlynn, pembantu AI kedai digital di WhatsApp.',
-  'Gaya: mesra, natural seperti manusia, ringkas, sedikit anime.',
-  'Bahasa: jawab dalam bahasa yang sama seperti mesej terakhir pengguna (Indonesia, Melayu atau English).',
-  'Jangan campur bahasa dalam satu jawapan kecuali istilah produk.',
-  'JANGAN mereka-reka harga, stok, kod produk atau nama produk.',
-  'Jika ditanya harga atau stok, arahkan pelanggan: ``.price [kata kunci]`` atau sebut nama kategori (cth: ml, ff, pln).',
-  'Jangan mengaku melakukan tindakan yang belum dilakukan.',
-  'Jangan dedahkan token, API key atau rahsia sistem.',
-  'Untuk transaksi, arahkan pengguna guna format order rasmi.',
-  'Jawapan maksimum 3 ayat.'
-].join(' ');
+// Byte-identical on every call so the server prompt cache always hits.
+const DEFAULT_SYSTEM_PROMPT =
+  'Kamu Merlynn, asisten toko top-up. Jawab 1-2 kalimat singkat, ikut bahasa user, jangan mengarang harga.';
 
 const LANG_LINE: Record<'id' | 'en' | 'ms', string> = {
-  id: 'Balas dalam Bahasa Indonesia yang santai dan jelas.',
-  en: 'Reply in clear, friendly English.',
-  ms: 'Balas dalam Bahasa Melayu yang santai dan jelas.'
+  id: ' (Indonesia).',
+  en: ' (English).',
+  ms: ' (Melayu).'
 };
 
 /** Rough language guess from the customer message; cheap and offline. */
@@ -57,6 +48,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly systemPrompt: string;
   private readonly timeoutMs: number;
+  private readonly deadlineMs: number;
   private readonly fallbackUrl: string;
   private readonly fallbackModel: string;
   private readonly langMode: 'auto' | 'id' | 'en' | 'ms';
@@ -70,6 +62,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.apiKey = env('LLM_API_KEY');
     this.systemPrompt = env('LLM_SYSTEM_PROMPT') || DEFAULT_SYSTEM_PROMPT;
     this.timeoutMs = Number(env('LLM_TIMEOUT_MS', String(DEFAULT_TIMEOUT_MS))) || DEFAULT_TIMEOUT_MS;
+    this.deadlineMs = Number(env('LLM_DEADLINE_MS', '2000')) || 2000;
     this.fallbackUrl = env('LLM_FALLBACK_URL').replace(/\/$/, '');
     this.fallbackModel = env('LLM_FALLBACK_MODEL') || this.model;
     const mode = env('LLM_LANG', 'auto').toLowerCase();
@@ -92,30 +85,30 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const lang = this.langMode === 'auto' ? detectLang(prompt) : this.langMode;
     const system = `${this.systemPrompt} ${LANG_LINE[lang]}`;
 
-    // Prefer the fast node (phone/Termux) when it is reachable; fall back to the
-    // always-on VPS endpoint. Probe is cached so we do not pay it per message.
-    if (this.fallbackUrl && this.preferFallback() && (await this.fallbackHealthy())) {
-      try {
-        return await this.request(this.fallbackUrl, this.fallbackModel, system, userContent);
-      } catch {
-        this.healthyUntil = 0;
-      }
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // Hard latency budget: the caller never waits longer than deadlineMs.
+    const deadline = new AbortController();
+    const budget = setTimeout(() => deadline.abort(), this.deadlineMs);
     try {
-      return await this.request(this.baseUrl, this.model, system, userContent, controller.signal);
-    } catch (error) {
-      if (!this.fallbackUrl) {
-        if (error instanceof Error && error.name === 'AbortError') {
-          throw new Error(`LLM timeout selepas ${this.timeoutMs} ms`);
+      const attempt = (baseUrl: string, model: string): Promise<string> =>
+        this.deadlineMs < this.timeoutMs
+          ? Promise.race([
+              this.request(baseUrl, model, system, userContent),
+              new Promise<string>((_, reject) => {
+                deadline.signal.addEventListener('abort', () => reject(new Error('DEADLINE')));
+              })
+            ])
+          : this.request(baseUrl, model, system, userContent);
+
+      if (this.fallbackUrl && this.preferFallback() && (await this.fallbackHealthy())) {
+        try {
+          return await attempt(this.fallbackUrl, this.fallbackModel);
+        } catch {
+          this.healthyUntil = 0;
         }
-        throw error instanceof Error ? error : new Error('LLM request gagal');
       }
-      return await this.request(this.fallbackUrl, this.fallbackModel, system, userContent);
+      return await attempt(this.baseUrl, this.model);
     } finally {
-      clearTimeout(timer);
+      clearTimeout(budget);
     }
   }
 
@@ -159,7 +152,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         model,
         stream: false,
         temperature: 0.7,
-        max_tokens: 64,
+        max_tokens: 20,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent }
