@@ -504,7 +504,7 @@ export class WhatsAppClient {
     }
 
     if (intent.kind === 'search') {
-      await this.price(jid, intent.query);
+      await this.searchPrice(jid, intent.query);
       return;
     }
 
