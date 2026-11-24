@@ -792,42 +792,43 @@ export class WhatsAppClient {
   private async sendMenu(jid: string, name: string): Promise<void> {
     const sections: MenuSection[] = [
       {
-        title: 'ᴄᴀᴛᴀʟᴏɢᴜᴇ - だ !',
+        title: tr('menu.section.catalogue'),
         items: [
-          `${store.prefix}kategori — senarai kategori & status`,
-          `${store.prefix}aktif / ${store.prefix}nonaktif [kategori] — tapis`,
-          `${store.prefix}price [kata kunci] — cari produk`,
-          `${store.keyword} [kode] [target] — order terus`
+          `${store.prefix}kategori — ${tr('menu.item.categories')}`,
+          `${store.prefix}aktif / ${store.prefix}nonaktif [kategori] — ${tr('menu.item.filter')}`,
+          `${store.prefix}price [kata kunci] — ${tr('menu.item.search')}`,
+          `${store.keyword} [kode] [target] — ${tr('menu.item.order')}`
         ]
       },
       {
-        title: 'ᴋᴀᴛᴇɢᴏʀɪ - 🎮',
+        title: tr('menu.section.category'),
         items: chunkKeys(['ml', 'ff', 'pubg', 'codm', 'genshin', 'hok', 'valorant', 'roblox', 'starlight', 'steam', 'gplay', 'pln', 'pulsa', 'data', 'emoney'])
       },
       {
-        title: 'ᴘᴀʏᴍᴇɴᴛ - 💳',
+        title: tr('menu.section.payment'),
         items: [
-          `${store.prefix}pay — info pembayaran`,
-          `${store.prefix}deposit [jumlah] — invoice deposit`
+          `${store.prefix}pay — ${tr('menu.item.payment')}`,
+          `${store.prefix}deposit [jumlah] — ${tr('menu.item.deposit')}`
         ]
       },
       {
-        title: 'ʙᴀɴᴛᴜᴀɴ - 📖',
+        title: tr('menu.section.help'),
         items: [
-          `${store.prefix}cara — cara order`,
-          `${store.prefix}syarat — terma & syarat`,
-          `${store.prefix}owner — hubungi owner`,
-          `${store.prefix}status [trxid] — semak transaksi`
+          `${store.prefix}cara — ${tr('menu.item.howto')}`,
+          `${store.prefix}syarat — ${tr('menu.item.terms')}`,
+          `${store.prefix}owner — ${tr('menu.item.owner')}`,
+          `${store.prefix}status [trxid] — ${tr('menu.item.status')}`,
+          `${store.prefix}lang id|en — ${tr('menu.item.lang')}`
         ]
       },
       {
-        title: 'ᴏᴡɴᴇʀ - 👑',
+        title: tr('menu.section.owner'),
         items: [
-          `${store.prefix}saldo — baki provider`,
-          `${store.prefix}topup [sku] [target] — order manual`,
+          `${store.prefix}saldo — ${tr('menu.item.balance')}`,
+          `${store.prefix}topup [sku] [target] — ${tr('menu.item.topup')}`,
           `${store.prefix}deposits / ${store.prefix}approve / ${store.prefix}reject`,
-          `${store.prefix}claimowner — daftar owner group`,
-          `${store.prefix}uptime — status bot`
+          `${store.prefix}claimowner — ${tr('menu.item.claim')}`,
+          `${store.prefix}uptime — ${tr('menu.item.uptime')}`
         ]
       }
     ];
