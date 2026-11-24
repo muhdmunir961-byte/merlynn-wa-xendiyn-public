@@ -1,5 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   type WASocket,
   type WAMessage,
   type AuthenticationState
@@ -22,6 +23,8 @@ import { theme } from '../wording/theme.js';
 import { buildTree, filterItems, isActive, resolveNode, type CategoryNode } from '../catalog/tree.js';
 import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
 import { eventBus } from '../server/event-bus.js';
+import { extractOrderIntent, stripWakeWord } from '../bot/intent.js';
+import { sttConfigured, transcribe } from '../stt/whisper.js';
 import {
   balanceInfo,
   categoryOverview,
@@ -224,12 +227,18 @@ export class WhatsAppClient {
   private async handleMessage(message: WAMessage): Promise<void> {
     const remoteJid = message.key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast' || message.key.fromMe) return;
-    const text = messageText(message);
-    if (!text) return;
     if (this.rateLimited(remoteJid)) return;
 
     const senderJid = message.key.participant ?? remoteJid;
     const name = displayName(message, senderJid);
+
+    if (message.message?.audioMessage) {
+      await this.handleVoice(message, remoteJid, senderJid, name);
+      return;
+    }
+
+    const text = messageText(message);
+    if (!text) return;
     eventBus.emit('message', { jid: remoteJid, sender: senderJid, name, text, at: Date.now() });
 
     const command = parseCommand(text, config.commandPrefix) ?? parseOrder(text, store.keyword);
@@ -321,6 +330,92 @@ export class WhatsAppClient {
         }
         await this.reply(remoteJid, errors.unknown());
       }
+    }
+  }
+
+  private async handleVoice(message: WAMessage, jid: string, senderJid: string, name: string): Promise<void> {
+    if (!sttConfigured()) {
+      await this.reply(jid, [
+        '🎙️〔 *VOICE BELUM AKTIF* 〕🎙️',
+        '',
+        '> Owner perlu set `STT_BASE_URL` pada server bot.',
+        `> Sementara itu guna teks: \`${store.keyword} [kode] [target]\``
+      ].join('\n'));
+      return;
+    }
+
+    await this.react(message, '🎧');
+
+    let transcript = '';
+    try {
+      const buffer = await downloadMediaMessage(
+        message,
+        'buffer',
+        {},
+        { logger: this.logger, reuploadRequest: this.socket!.updateMediaMessage }
+      ) as Buffer;
+      const result = await transcribe(buffer, 'voice.ogg');
+      transcript = result.text;
+    } catch (error) {
+      await this.react(message, '❌');
+      await this.reply(jid, errors.requestFailed(error instanceof Error ? error.message : 'voice gagal diproses'));
+      return;
+    }
+
+    eventBus.emit('message', { jid, sender: senderJid, name, text: transcript, voice: true, at: Date.now() });
+
+    const instruction = stripWakeWord(transcript);
+    if (instruction === undefined) {
+      await this.react(message, '🤔');
+      return;
+    }
+    if (!instruction) {
+      await this.react(message, '👋');
+      await this.reply(jid, `🎙️ Ya? Sebut \`${store.keyword} order [kode] [target]\`.`, { mentions: [senderJid] });
+      return;
+    }
+
+    const intent = await extractOrderIntent(
+      instruction,
+      llmIsEnabled() ? this.providers.llm : undefined
+    );
+    if (!intent) {
+      await this.react(message, '🤔');
+      await this.reply(jid, [
+        '🎙️〔 *TIDAK FAHAM* 〕🎙️',
+        '',
+        `> Dengar: _${oneLine(transcript)}_`,
+        `> Cuba: \`${store.keyword} order MLID500 12345678\``
+      ].join('\n'), { mentions: [senderJid] });
+      return;
+    }
+
+    if (!store.orderAllowPublic && !this.isOwnerNow(jid, senderJid)) {
+      await this.react(message, '🚫');
+      await this.reply(jid, errors.orderPublicDisabled(), { mentions: [senderJid] });
+      return;
+    }
+
+    await this.react(message, '⏳');
+    await this.reply(jid, [
+      '🎙️〔 *VOICE ORDER* 〕🎙️',
+      '',
+      `> Dengar : _${oneLine(transcript)}_`,
+      `> SKU : \`${intent.sku}\``,
+      `> Target : ${intent.target}`,
+      `> Qty : ${intent.qty}x`
+    ].join('\n'), { mentions: [senderJid] });
+
+    await this.executeOrder(jid, intent.sku, intent.target, intent.qty, false, { mentions: [senderJid] });
+  }
+
+  private async react(message: WAMessage, emoji: string): Promise<void> {
+    try {
+      await this.socket?.sendMessage(message.key.remoteJid!, {
+        react: { text: emoji, key: message.key }
+      } as Parameters<WASocket['sendMessage']>[1]);
+    } catch (error) {
+      this.logger.debug({ error }, 'reaction failed');
     }
   }
 
@@ -676,7 +771,14 @@ export class WhatsAppClient {
     await this.executeOrder(jid, code, target, qty, false);
   }
 
-  private async executeOrder(jid: string, code: string, target: string, qty: number, manual: boolean): Promise<void> {
+  private async executeOrder(
+    jid: string,
+    code: string,
+    target: string,
+    qty: number,
+    manual: boolean,
+    meta?: { mentions?: string[]; tag?: string }
+  ): Promise<void> {
     if (!this.providers.digiflazz) {
       await this.reply(jid, errors.digiflazzMissing());
       return;
@@ -705,7 +807,7 @@ export class WhatsAppClient {
           product: product.product_name,
           target,
           price: product.price
-        }));
+        }), { mentions: meta?.mentions });
 
         const result = await this.providers.digiflazz.prepaidTransaction({
           sku: product.buyer_sku_code,
@@ -724,7 +826,7 @@ export class WhatsAppClient {
             price: result.price ?? product.price,
             serial: result.sn,
             message: manual ? undefined : oneLine(result.message)
-          }));
+          }), { mentions: meta?.mentions });
           continue;
         }
         if (status.includes('gagal') || status.includes('fail')) {
@@ -733,7 +835,7 @@ export class WhatsAppClient {
             product: product.product_name,
             target: result.customer_no,
             message: oneLine(result.message)
-          }));
+          }), { mentions: meta?.mentions });
           continue;
         }
         await this.reply(jid, orderPending({
@@ -741,7 +843,7 @@ export class WhatsAppClient {
           product: product.product_name,
           target: result.customer_no,
           message: oneLine(result.message)
-        }));
+        }), { mentions: meta?.mentions });
       }
     } catch (error) {
       await this.reply(jid, errors.requestFailed(error instanceof Error ? error.message : 'order gagal'));
@@ -784,11 +886,14 @@ export class WhatsAppClient {
     await this.reply(jid, text);
   }
 
-  private async reply(jid: string, text: string): Promise<void> {
+  private async reply(jid: string, text: string, options?: { mentions?: string[] }): Promise<void> {
     await this.queue.enqueue(async () => {
       if (!this.socket) return;
       await this.socket.sendPresenceUpdate('composing', jid);
-      await this.socket.sendMessage(jid, { text });
+      await this.socket.sendMessage(jid, {
+        text,
+        ...(options?.mentions?.length ? { mentions: options.mentions } : {})
+      });
       await this.socket.sendPresenceUpdate('paused', jid);
       eventBus.emit('reply', { jid, text, at: Date.now() });
     });
