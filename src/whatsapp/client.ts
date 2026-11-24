@@ -309,6 +309,17 @@ export class WhatsAppClient {
       case 'wording':
         await this.changeWording(remoteJid, senderJid, command.args);
         return;
+      case 'model':
+        await this.reply(remoteJid, [
+          '⚙️〔 *MODEL AI* 〕⚙️',
+          '',
+          `> Model : \`${config.llmModel}\``,
+          `> Endpoint : ${config.llmBaseUrl}`,
+          `> Bahasa : ${config.llmModel ? (process.env.LLM_LANG ?? 'auto') : '-'}`,
+          `> Panggil : ${config.wakeWords.join(', ')}`,
+          `> Panel : tiap ${process.env.PANEL_INTERVAL_MINUTES ?? 360} minit`
+        ].join('\n'));
+        return;
       case 'claimowner':
         await this.claimOwner(remoteJid, senderJid);
         return;
