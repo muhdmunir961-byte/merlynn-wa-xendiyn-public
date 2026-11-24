@@ -467,13 +467,24 @@ export class WhatsAppClient {
   }
 
   /** Natural-language entry point: the AI decides what to do, no commands needed. */
+  /** Drops every wake word so "merlyn ada ml 500?" searches for "ml 500". */
+  private withoutWakeWords(text: string): string {
+    let out = text;
+    for (const word of config.wakeWords) {
+      out = out.replace(new RegExp(`(^|[^a-z])${word}([^a-z]|$)`, 'gi'), ' ');
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
   private async handleFreeText(
     message: WAMessage,
     jid: string,
     senderJid: string,
     name: string,
-    text: string
+    rawText: string
   ): Promise<void> {
+    const text = this.withoutWakeWords(rawText) || rawText;
+
     const node = await this.resolveInput(text);
     if (node && !this.pendingOrders.has(jid)) {
       await this.browseNode(jid, node.category, node.subcategory?.key, 'all');

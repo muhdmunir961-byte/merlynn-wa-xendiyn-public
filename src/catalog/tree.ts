@@ -86,6 +86,21 @@ export const resolveNode = (
   return undefined;
 };
 
+const ALIASES: Record<string, string[]> = {
+  ml: ['mobile legends', 'mobile legend', 'mlbb'],
+  ff: ['free fire', 'ffmax'],
+  pubg: ['pubg mobile'],
+  codm: ['call of duty'],
+  hok: ['honor of kings'],
+  gi: ['genshin impact'],
+  pln: ['pln', 'token listrik'],
+  tsel: ['telkomsel'],
+  isat: ['indosat'],
+  emoney: ['dana', 'gopay', 'shopeepay', 'ovo']
+};
+
+const expandToken = (token: string): string[] => [token, ...(ALIASES[token] ?? [])];
+
 export const filterItems = (
   items: PriceListItem[],
   input: { categoryKey?: string; subKey?: string; query?: string; mode?: 'all' | 'active' | 'inactive' }
@@ -99,7 +114,14 @@ export const filterItems = (
     if (query) {
       const haystack = [item.buyer_sku_code, item.product_name, item.brand, item.category]
         .map((value) => value.toLowerCase());
-      if (!haystack.some((value) => value.includes(query))) return false;
+      const joined = haystack.join(' ');
+      // Match every word somewhere, so "ml 500 diamond" finds
+      // "MOBILE LEGENDS 500 DIAMONDS" instead of requiring one literal substring.
+      const tokens = query.split(/\s+/).filter((token) => token.length > 1);
+      const matched = tokens.length
+        ? tokens.every((token) => expandToken(token).some((candidate) => joined.includes(candidate)))
+        : haystack.some((value) => value.includes(query));
+      if (!matched) return false;
     }
     if (mode === 'active') return isActive(item);
     if (mode === 'inactive') return !isActive(item);
