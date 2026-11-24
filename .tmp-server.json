@@ -1,0 +1,13 @@
+{
+  "name": "merlynn-wa-bot",
+  "description": "Merlynn WhatsApp WebSocket bot",
+  "user": 1,
+  "egg": 15,
+  "docker_image": "node:22-alpine",
+  "startup": "npm install --include=dev && npm run build && npm start",
+  "environment": {},
+  "limits": { "memory": 1024, "swap": 0, "disk": 4096, "io": 500, "cpu": 100 },
+  "feature_limits": { "databases": 0, "allocations": 0, "backups": 0 },
+  "allocation": { "default": 1 },
+  "skip_scripts": true
+}

@@ -6,17 +6,39 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
+import { clearLatestQr, setLatestQr } from './qr-store.js';
 import { config } from '../config.js';
 import { claimGroupOwner } from '../bot/owner-claim.js';
-import { parseCommand } from '../bot/parser.js';
+import { parseCommand, parseOrder } from '../bot/parser.js';
 import { JsonStore } from '../persistence/json-store.js';
 import { ManualDepositService } from '../deposit/manual.js';
-import { DigiflazzClient } from '../digiflazz/client.js';
+import { DigiflazzClient, type PriceListItem } from '../digiflazz/client.js';
 import { ollamaLlmProvider } from '../llm/ollama.js';
 import type { LlmProvider } from '../plugins/interfaces.js';
 import { OutgoingQueue } from './queue.js';
 import { loadAuth } from './auth.js';
+import {
+  balanceInfo,
+  depositCreated,
+  depositList,
+  depositReviewed,
+  errors,
+  greetingHeader,
+  helpFooter,
+  menu,
+  newRefId,
+  noProducts,
+  orderFailed,
+  orderPending,
+  orderProcessing,
+  orderSuccess,
+  paymentInfo,
+  productList,
+  store,
+  usage,
+  type MenuSection,
+  type ProductView
+} from '../wording/store.js';
 
 interface ClientProviders {
   deposits: ManualDepositService;
@@ -24,6 +46,7 @@ interface ClientProviders {
   digiflazz?: DigiflazzClient;
 }
 
+const PRICE_CACHE_TTL_MS = 10 * 60 * 1000;
 const llmIsEnabled = (): boolean => ['true', '1', 'yes'].includes((process.env.LLM_ENABLED ?? '').trim().toLowerCase());
 const safeAmount = (value: string | undefined): number | undefined => {
   if (!value || !/^\d+$/.test(value)) return undefined;
@@ -31,6 +54,17 @@ const safeAmount = (value: string | undefined): number | undefined => {
   return Number.isSafeInteger(amount) && amount > 0 ? amount : undefined;
 };
 const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
+const displayName = (message: WAMessage, jid: string): string => {
+  const name = message.pushName?.trim();
+  if (name) return name;
+  return jid.split('@')[0]?.replace(/\D/g, '').slice(-6) ?? 'kak';
+};
+const toProductView = (item: PriceListItem): ProductView => ({
+  code: item.buyer_sku_code,
+  name: item.product_name,
+  price: item.price,
+  ready: Boolean(item.seller_product_status) && Boolean(item.buyer_product_status)
+});
 
 export class WhatsAppClient {
   private socket?: WASocket;
@@ -42,9 +76,11 @@ export class WhatsAppClient {
   private readonly histories = new Map<string, string[]>();
   private readonly providers: ClientProviders;
   private readonly llmLastRequest = new Map<string, number>();
+  private readonly userRate = new Map<string, { count: number; windowStart: number }>();
+  private priceCache?: { at: number; items: PriceListItem[] };
 
-  constructor(private readonly store: JsonStore, providers?: ClientProviders) {
-    this.providers = providers ?? { deposits: new ManualDepositService(store), llm: ollamaLlmProvider };
+  constructor(private readonly store_: JsonStore, providers?: ClientProviders) {
+    this.providers = providers ?? { deposits: new ManualDepositService(store_), llm: ollamaLlmProvider };
   }
 
   async start(): Promise<void> {
@@ -78,11 +114,11 @@ export class WhatsAppClient {
   }
 
   private onConnectionUpdate(update: { connection?: 'open' | 'close' | 'connecting'; qr?: string; lastDisconnect?: { error?: unknown } }): void {
-    if (update.qr) {
-      console.log('\nScan this WhatsApp QR code:\n');
-      qrcode.generate(update.qr, { small: true });
+    if (update.qr) setLatestQr(update.qr);
+    if (update.connection === 'open') {
+      clearLatestQr();
+      this.logger.info('WhatsApp connected');
     }
-    if (update.connection === 'open') this.logger.info('WhatsApp connected');
     if (update.connection !== 'close' || this.stopping) return;
     const statusCode = (update.lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
     if (statusCode === DisconnectReason.loggedOut) {
@@ -95,139 +131,386 @@ export class WhatsAppClient {
     }, 3000);
   }
 
+  private rateLimited(jid: string): boolean {
+    const limit = Number(process.env.USER_RATE_LIMIT ?? 20);
+    const windowMs = 60_000;
+    const now = Date.now();
+    const entry = this.userRate.get(jid);
+    if (!entry || now - entry.windowStart > windowMs) {
+      this.userRate.set(jid, { count: 1, windowStart: now });
+      return false;
+    }
+    entry.count += 1;
+    return entry.count > limit;
+  }
+
   private async handleMessage(message: WAMessage): Promise<void> {
     const remoteJid = message.key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast' || message.key.fromMe) return;
     const text = message.message?.conversation ?? message.message?.extendedTextMessage?.text;
     if (!text) return;
-    const command = parseCommand(text, config.commandPrefix);
+    if (this.rateLimited(remoteJid)) return;
+
     const senderJid = message.key.participant ?? remoteJid;
+    const name = displayName(message, senderJid);
+    const command = parseCommand(text, config.commandPrefix) ?? parseOrder(text, store.keyword);
+
     if (!command) {
-      if (llmIsEnabled()) await this.askLlm(remoteJid, text);
+      if (llmIsEnabled()) await this.askLlm(remoteJid, text, name);
       return;
     }
 
     switch (command.name) {
       case 'menu':
       case 'help':
-        await this.reply(remoteJid, 'Commands: .menu .help .ping .claimowner .ai <text> .price [query] .deposit <amount> .deposits .approve <id> .reject <id> .saldo .topup <sku> <customer> .status <ref_id>');
+        await this.reply(remoteJid, this.menuText(name));
         return;
       case 'ping':
-        await this.reply(remoteJid, 'pong');
+        await this.reply(remoteJid, `🏓 Pong! Bot aktif.\n> ${new Date().toISOString()}`);
+        return;
+      case 'pay':
+        await this.reply(remoteJid, paymentInfo());
         return;
       case 'claimowner':
         await this.claimOwner(remoteJid, senderJid);
         return;
       case 'ai':
-        await this.askLlm(remoteJid, command.args.join(' '));
+        await this.askLlm(remoteJid, command.args.join(' '), name);
         return;
       case 'price':
+      case 'list':
         await this.price(remoteJid, command.args.join(' '));
+        return;
+      case 'order':
+        if (!store.orderAllowPublic && !(await this.isOwner(remoteJid, senderJid))) {
+          await this.reply(remoteJid, errors.orderPublicDisabled());
+          return;
+        }
+        await this.order(remoteJid, senderJid, command.args);
         return;
       default:
         if (['deposit', 'deposits', 'approve', 'reject', 'saldo', 'topup', 'status'].includes(command.name)) {
-          if (!(await this.isStoredOwner(remoteJid, senderJid))) return;
-          await this.ownerOrDigiflazzCommand(remoteJid, senderJid, command.name, command.args);
+          if (!(await this.isOwner(remoteJid, senderJid))) return;
+          await this.ownerCommand(remoteJid, senderJid, command.name, command.args);
           return;
         }
-        await this.reply(remoteJid, 'Unknown command. Try .help.');
+        await this.reply(remoteJid, errors.unknown());
     }
+  }
+
+  private menuText(name: string): string {
+    const sections: MenuSection[] = [
+      {
+        title: 'Cᴀᴛᴀʟᴏɢᴜᴇ - だ !',
+        items: [
+          `${store.prefix}price [kata kunci] — cari produk`,
+          `${store.prefix}list — semua produk tersedia`,
+          `${store.keyword} [kode] [target] — order terus`
+        ]
+      },
+      {
+        title: 'ᴘᴀʏᴍᴇɴᴛ - 💳',
+        items: [
+          `${store.prefix}pay — info pembayaran`,
+          `${store.prefix}deposit [jumlah] — buat invoice deposit`
+        ]
+      },
+      {
+        title: 'ᴀᴋᴜɴ & sᴛᴀᴛᴜs - 📋',
+        items: [
+          `${store.prefix}status [trxid] — semak transaksi`,
+          `${store.prefix}claimowner — daftar owner group`
+        ]
+      },
+      {
+        title: 'ᴏᴡɴᴇʀ - 👑',
+        items: [
+          `${store.prefix}saldo — baki provider`,
+          `${store.prefix}topup [sku] [target] — order manual`,
+          `${store.prefix}deposits — senarai deposit pending`,
+          `${store.prefix}approve / ${store.prefix}reject [invoice]`
+        ]
+      }
+    ];
+    return [menu(name, sections), '', helpFooter()].join('\n');
   }
 
   private async claimOwner(groupJid: string, senderJid: string): Promise<void> {
     if (!groupJid.endsWith('@g.us') || !this.socket) {
-      await this.reply(groupJid, 'Owner claims are only available in groups.');
+      await this.reply(groupJid, errors.ownerGroupOnly());
       return;
     }
     try {
       const metadata = await this.socket.groupMetadata(groupJid);
-      await this.reply(groupJid, await claimGroupOwner(this.store, metadata, senderJid));
+      const result = await claimGroupOwner(this.store_, metadata, senderJid);
+      const message = result.includes('claimed') || result.includes('berjaya')
+        ? errors.claimSuccess()
+        : result.includes('already')
+          ? errors.claimExists()
+          : result.includes('admin')
+            ? errors.claimNotAdmin()
+            : result;
+      await this.reply(groupJid, message);
     } catch {
-      await this.reply(groupJid, 'I could not verify group permissions. Please try again.');
+      await this.reply(groupJid, errors.claimFailed());
     }
   }
 
-  private async isStoredOwner(jid: string, senderJid: string): Promise<boolean> {
-    if (!jid.endsWith('@g.us') || this.store.getOwner(jid)?.jid !== senderJid) {
-      await this.reply(jid, 'Only the stored group owner can run this command.');
-      return false;
-    }
-    return true;
+  private isOwnerNow(jid: string, senderJid: string): boolean {
+    return jid.endsWith('@g.us') && this.store_.getOwner(jid)?.jid === senderJid;
   }
 
-  private async ownerOrDigiflazzCommand(jid: string, ownerJid: string, name: string, args: string[]): Promise<void> {
+  private async isOwner(jid: string, senderJid: string): Promise<boolean> {
+    if (this.isOwnerNow(jid, senderJid)) return true;
+    await this.reply(jid, errors.ownerOnly());
+    return false;
+  }
+
+  private async priceItems(): Promise<PriceListItem[]> {
+    if (!this.providers.digiflazz) throw new Error('Digiflazz belum dikonfigurasi');
+    const cached = this.priceCache;
+    if (cached && Date.now() - cached.at < PRICE_CACHE_TTL_MS) return cached.items;
+    const items = await this.providers.digiflazz.getPriceList();
+    this.priceCache = { at: Date.now(), items };
+    return items;
+  }
+
+  private async ownerCommand(jid: string, ownerJid: string, name: string, args: string[]): Promise<void> {
     try {
       if (name === 'deposit') {
         const amount = safeAmount(args[0]);
-        if (!amount) { await this.reply(jid, 'Usage: .deposit <positive integer amount>'); return; }
+        if (!amount) {
+          await this.reply(jid, errors.usage(usage.deposit));
+          return;
+        }
         const result = await this.providers.deposits.createRequest({ requesterJid: ownerJid, amount });
-        await this.reply(jid, `Pending deposit created: ${result.id}`);
+        await this.reply(jid, depositCreated({ id: result.id, amount }));
         return;
       }
       if (name === 'deposits') {
         const pending = this.providers.deposits.listPending();
-        await this.reply(jid, pending.length ? pending.map((item) => `${item.id} — ${item.amount} (${item.requesterJid})`).join('\n') : 'No pending deposits.');
+        await this.reply(jid, depositList(pending.map((item) => ({ id: item.id, amount: item.amount }))));
         return;
       }
       if (name === 'approve' || name === 'reject') {
         const id = args[0];
-        if (!id) { await this.reply(jid, `Usage: .${name} <id>`); return; }
+        if (!id) {
+          await this.reply(jid, errors.usage(name === 'approve' ? usage.approve : usage.reject));
+          return;
+        }
         const result = name === 'approve'
           ? await this.providers.deposits.ownerApprove(id, ownerJid)
           : await this.providers.deposits.ownerReject(id, ownerJid, args.slice(1).join(' ') || undefined);
-        await this.reply(jid, `Deposit ${result.id} ${result.status}.`);
+        await this.reply(jid, depositReviewed({
+          id: result.id,
+          amount: result.amount,
+          status: result.status === 'approved' ? 'approved' : 'rejected',
+          reason: result.rejectionReason
+        }));
         return;
       }
-      if (!this.providers.digiflazz) { await this.reply(jid, 'Digiflazz is not configured.'); return; }
+      if (!this.providers.digiflazz) {
+        await this.reply(jid, errors.digiflazzMissing());
+        return;
+      }
       if (name === 'saldo') {
         const result = await this.providers.digiflazz.checkBalance();
-        await this.reply(jid, `Saldo: ${result.balance} ${result.currency}`);
+        await this.reply(jid, balanceInfo(result.balance, result.currency));
         return;
       }
       if (name === 'topup') {
-        if (!args[0] || !args[1]) { await this.reply(jid, 'Usage: .topup <sku> <customer>'); return; }
-        const result = await this.providers.digiflazz.prepaidTransaction({ sku: args[0], customer: args[1] });
-        await this.reply(jid, `Topup ${result.status}: ${result.ref_id} — ${oneLine(result.message)}`);
+        if (!args[0] || !args[1]) {
+          await this.reply(jid, errors.usage(usage.topup));
+          return;
+        }
+        await this.executeOrder(jid, args[0], args[1], 1, true);
         return;
       }
       if (name === 'status') {
-        if (!args[0]) { await this.reply(jid, 'Usage: .status <ref_id>'); return; }
+        if (!args[0]) {
+          await this.reply(jid, errors.usage(usage.status));
+          return;
+        }
         const result = await this.providers.digiflazz.checkStatus({ refId: args[0] });
-        await this.reply(jid, `Status ${result.status}: ${result.ref_id} — ${oneLine(result.message)}`);
+        const status = result.status.toLowerCase();
+        if (status.includes('sukses') || status.includes('success')) {
+          await this.reply(jid, orderSuccess({
+            refId: result.ref_id,
+            product: result.buyer_sku_code,
+            target: result.customer_no,
+            price: result.price,
+            serial: result.sn,
+            message: oneLine(result.message)
+          }));
+          return;
+        }
+        if (status.includes('gagal') || status.includes('fail')) {
+          await this.reply(jid, orderFailed({
+            refId: result.ref_id,
+            product: result.buyer_sku_code,
+            target: result.customer_no,
+            message: oneLine(result.message)
+          }));
+          return;
+        }
+        await this.reply(jid, orderPending({
+          refId: result.ref_id,
+          product: result.buyer_sku_code,
+          target: result.customer_no,
+          message: oneLine(result.message)
+        }));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Request failed.';
-      await this.reply(jid, `Request failed: ${message}`);
+      await this.reply(jid, errors.requestFailed(error instanceof Error ? error.message : 'request gagal'));
+    }
+  }
+
+  private async order(jid: string, _senderJid: string, args: string[]): Promise<void> {
+    const [code, target, qtyArg] = args;
+    if (!code || !target) {
+      await this.reply(jid, errors.usage(usage.order));
+      return;
+    }
+    const qty = qtyArg && /^\d+x$/i.test(qtyArg) ? Number(qtyArg.slice(0, -1)) : 1;
+    if (!Number.isFinite(qty) || qty < 1) {
+      await this.reply(jid, errors.usage(usage.order));
+      return;
+    }
+    if (qty > store.maxQty) {
+      await this.reply(jid, errors.orderQtyTooHigh());
+      return;
+    }
+    if (!this.providers.digiflazz) {
+      await this.reply(jid, errors.digiflazzMissing());
+      return;
+    }
+    await this.executeOrder(jid, code, target, qty, false);
+  }
+
+  private async executeOrder(jid: string, code: string, target: string, qty: number, manual: boolean): Promise<void> {
+    if (!this.providers.digiflazz) {
+      await this.reply(jid, errors.digiflazzMissing());
+      return;
+    }
+    try {
+      const items = await this.priceItems();
+      const product = items.find((item) => item.buyer_sku_code.toLowerCase() === code.toLowerCase());
+      if (!product) {
+        await this.reply(jid, noProducts(code));
+        return;
+      }
+      if (!product.seller_product_status || !product.buyer_product_status) {
+        await this.reply(jid, orderFailed({
+          refId: '-',
+          product: product.product_name,
+          target,
+          message: 'produk sedang gangguan, cuba produk lain'
+        }));
+        return;
+      }
+
+      for (let index = 0; index < qty; index += 1) {
+        const refId = newRefId();
+        await this.reply(jid, orderProcessing({
+          refId,
+          product: product.product_name,
+          target,
+          price: product.price
+        }));
+
+        const result = await this.providers.digiflazz.prepaidTransaction({
+          sku: product.buyer_sku_code,
+          customer: target,
+          refId
+        });
+        const status = result.status.toLowerCase();
+        if (status.includes('sukses') || status.includes('success')) {
+          await this.reply(jid, orderSuccess({
+            refId: result.ref_id,
+            product: product.product_name,
+            target: result.customer_no,
+            price: result.price ?? product.price,
+            serial: result.sn,
+            message: manual ? undefined : oneLine(result.message)
+          }));
+          continue;
+        }
+        if (status.includes('gagal') || status.includes('fail')) {
+          await this.reply(jid, orderFailed({
+            refId: result.ref_id,
+            product: product.product_name,
+            target: result.customer_no,
+            message: oneLine(result.message)
+          }));
+          continue;
+        }
+        await this.reply(jid, orderPending({
+          refId: result.ref_id,
+          product: product.product_name,
+          target: result.customer_no,
+          message: oneLine(result.message)
+        }));
+      }
+    } catch (error) {
+      await this.reply(jid, errors.requestFailed(error instanceof Error ? error.message : 'order gagal'));
     }
   }
 
   private async price(jid: string, query: string): Promise<void> {
-    if (!this.providers.digiflazz) { await this.reply(jid, 'Digiflazz is not configured.'); return; }
+    if (!this.providers.digiflazz) {
+      await this.reply(jid, errors.digiflazzMissing());
+      return;
+    }
     try {
-      const items = await this.providers.digiflazz.getPriceList();
+      const items = await this.priceItems();
       const needle = query.trim().toLowerCase();
-      const matches = (needle ? items.filter((item) => [item.buyer_sku_code, item.product_name, item.brand, item.category].some((value) => value.toLowerCase().includes(needle))) : items).slice(0, 10);
-      await this.reply(jid, matches.length ? matches.map((item) => `${item.buyer_sku_code} — ${item.product_name} — ${item.price ?? '-'} — ${item.seller_product_status ? 'active' : 'inactive'}`).join('\n') : 'No matching products.');
+      const matches = needle
+        ? items.filter((item) => [item.buyer_sku_code, item.product_name, item.brand, item.category]
+            .some((value) => value.toLowerCase().includes(needle)))
+        : items;
+      if (!matches.length) {
+        await this.reply(jid, noProducts(query));
+        return;
+      }
+      const shown = matches.slice(0, 10);
+      const brand = needle ? matches[0]?.brand ?? 'produk' : 'semua produk';
+      await this.reply(jid, productList(brand, shown.map(toProductView), store.keyword));
+      if (matches.length > shown.length) {
+        await this.reply(jid, `ℹ️ Ada ${matches.length} produk. Tunjuk 10 sahaja — guna kata kunci lebih spesifik.`);
+      }
     } catch (error) {
-      await this.reply(jid, `Price lookup failed: ${error instanceof Error ? error.message : 'request failed.'}`);
+      await this.reply(jid, errors.priceFailed(error instanceof Error ? error.message : 'request gagal'));
     }
   }
 
-  private async askLlm(jid: string, prompt: string): Promise<void> {
-    if (!prompt.trim()) { await this.reply(jid, 'Usage: .ai <text>'); return; }
+  private async askLlm(jid: string, prompt: string, name: string): Promise<void> {
+    if (!prompt.trim()) {
+      await this.reply(jid, errors.usage(usage.ai));
+      return;
+    }
+    if (!llmIsEnabled()) {
+      await this.reply(jid, errors.aiDisabled());
+      return;
+    }
     const now = Date.now();
     const last = this.llmLastRequest.get(jid) ?? 0;
-    if (now - last < config.llmRateLimitMs) { await this.reply(jid, 'Please wait before sending another AI request.'); return; }
-    if (!llmIsEnabled()) { await this.reply(jid, 'AI is disabled.'); return; }
+    if (now - last < config.llmRateLimitMs) {
+      await this.reply(jid, errors.aiRateLimited());
+      return;
+    }
     this.llmLastRequest.set(jid, now);
     const history = this.histories.get(jid) ?? [];
     try {
-      const answer = await this.providers.llm.complete({ prompt, context: history.join('\n') });
-      const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`].slice(-Math.max(2, config.llmHistoryLimit));
+      const answer = await this.providers.llm.complete({
+        prompt: `${prompt}`,
+        context: [`Pelanggan: ${name}`, ...history].join('\n')
+      });
+      const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]
+        .slice(-Math.max(2, config.llmHistoryLimit));
       this.histories.set(jid, next);
       await this.reply(jid, answer);
     } catch (error) {
-      await this.reply(jid, `AI request failed: ${error instanceof Error ? error.message : 'request failed.'}`);
+      await this.reply(jid, errors.aiFailed(error instanceof Error ? error.message : 'request gagal'));
     }
   }
 
