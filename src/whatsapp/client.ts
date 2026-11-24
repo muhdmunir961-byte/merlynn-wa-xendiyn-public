@@ -874,7 +874,7 @@ export class WhatsAppClient {
       ?? content?.videoMessage?.contextInfo
       ?? content?.documentMessage?.contextInfo;
 
-    const normalise = (value: string | undefined): string => (value ?? '').split('@')[0]?.split(':')[0] ?? '';
+    const normalise = (value: string | null | undefined): string => (value ?? '').split('@')[0]?.split(':')[0] ?? '';
 
     if ((context?.mentionedJid ?? []).some((mentioned) => normalise(mentioned) === self)) return true;
     if (normalise(context?.participant) === self) return true;
