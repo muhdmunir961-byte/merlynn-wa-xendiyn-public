@@ -9,11 +9,30 @@ const MAX_CONTEXT_CHARS = 2_000;
 const DEFAULT_SYSTEM_PROMPT = [
   'Kamu ialah Merlynn, pembantu AI kedai digital di WhatsApp.',
   'Gaya: mesra, natural seperti manusia, ringkas, sedikit anime.',
-  'Bahasa ikut pengguna (Melayu/Indonesia/English).',
+  'Bahasa: jawab dalam bahasa yang sama seperti mesej terakhir pengguna (Indonesia, Melayu atau English).',
+  'Jangan campur bahasa dalam satu jawapan kecuali istilah produk.',
   'Jangan mengaku melakukan tindakan yang belum dilakukan.',
   'Jangan dedahkan token, API key atau rahsia sistem.',
   'Untuk transaksi, arahkan pengguna guna format order rasmi.'
 ].join(' ');
+
+const LANG_LINE: Record<'id' | 'en' | 'ms', string> = {
+  id: 'Balas dalam Bahasa Indonesia yang santai dan jelas.',
+  en: 'Reply in clear, friendly English.',
+  ms: 'Balas dalam Bahasa Melayu yang santai dan jelas.'
+};
+
+/** Rough language guess from the customer message; cheap and offline. */
+export const detectLang = (text: string): 'id' | 'en' | 'ms' => {
+  const lower = ` ${text.toLowerCase()} `;
+  const hits = (words: string[]): number => words.filter((word) => lower.includes(` ${word} `)).length;
+  const id = hits(['yang', 'tidak', 'sudah', 'belum', 'bisa', 'saja', 'juga', 'kak', 'bang', 'makasih', 'terima', 'kasih', 'harga', 'mau', 'gimana', 'berapa', 'iya', 'dong', 'bintang']);
+  const ms = hits(['yang', 'tak', 'dah', 'belum', 'boleh', 'sahaja', 'juga', 'kak', 'harga', 'nak', 'macam', 'mana', 'berapa', 'ya', 'lah', 'kot']);
+  const en = hits(['the', 'is', 'are', 'do', 'does', 'can', 'could', 'would', 'please', 'thanks', 'thank', 'you', 'price', 'how', 'much', 'want', 'need', 'order', 'buy', 'hello', 'hi']);
+  if (en > id && en > ms) return 'en';
+  if (ms > id) return 'ms';
+  return 'id';
+};
 
 type ChatResponse = {
   choices?: Array<{ message?: { content?: unknown } }>;
@@ -35,6 +54,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly systemPrompt: string;
   private readonly timeoutMs: number;
+  private readonly fallbackUrl: string;
+  private readonly fallbackModel: string;
+  private readonly langMode: 'auto' | 'id' | 'en' | 'ms';
 
   constructor() {
     this.enabled = isEnabled(process.env.LLM_ENABLED);
@@ -43,6 +65,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.apiKey = env('LLM_API_KEY');
     this.systemPrompt = env('LLM_SYSTEM_PROMPT') || DEFAULT_SYSTEM_PROMPT;
     this.timeoutMs = Number(env('LLM_TIMEOUT_MS', String(DEFAULT_TIMEOUT_MS))) || DEFAULT_TIMEOUT_MS;
+    this.fallbackUrl = env('LLM_FALLBACK_URL').replace(/\/$/, '');
+    this.fallbackModel = env('LLM_FALLBACK_MODEL') || this.model;
+    const mode = env('LLM_LANG', 'auto').toLowerCase();
+    this.langMode = mode === 'id' || mode === 'en' || mode === 'ms' ? mode : 'auto';
   }
 
   isEnabled(): boolean {
@@ -57,42 +83,57 @@ export class OpenAiCompatibleProvider implements LlmProvider {
 
     const context = input.context ? trimTo(input.context, MAX_CONTEXT_CHARS) : '';
     const userContent = context ? `Konteks:\n${context}\n\nMesej:\n${prompt}` : prompt;
+    const lang = this.langMode === 'auto' ? detectLang(prompt) : this.langMode;
+    const system = `${this.systemPrompt} ${LANG_LINE[lang]}`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
-        },
-        body: JSON.stringify({
-          model: this.model,
-          stream: false,
-          temperature: 0.7,
-          max_tokens: 120,
-          messages: [
-            { role: 'system', content: this.systemPrompt },
-            { role: 'user', content: userContent }
-          ]
-        }),
-        signal: controller.signal
-      });
-
-      if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
-      const payload = (await response.json()) as ChatResponse;
-      const content = payload.choices?.[0]?.message?.content;
-      if (typeof content !== 'string' || !content.trim()) throw new Error('LLM pulangkan jawapan kosong');
-      return content.trim();
+      return await this.request(this.baseUrl, this.model, system, userContent, controller.signal);
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`LLM timeout selepas ${this.timeoutMs} ms`);
+      if (!this.fallbackUrl) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new Error(`LLM timeout selepas ${this.timeoutMs} ms`);
+        }
+        throw error instanceof Error ? error : new Error('LLM request gagal');
       }
-      throw error instanceof Error ? error : new Error('LLM request gagal');
+      return await this.request(this.fallbackUrl, this.fallbackModel, system, userContent);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async request(
+    baseUrl: string,
+    model: string,
+    system: string,
+    userContent: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        temperature: 0.7,
+        max_tokens: 120,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userContent }
+        ]
+      }),
+      signal
+    });
+
+    if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
+    const payload = (await response.json()) as ChatResponse;
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) throw new Error('LLM pulangkan jawapan kosong');
+    return content.trim();
   }
 }
 
