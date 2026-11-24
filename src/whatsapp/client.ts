@@ -24,6 +24,8 @@ import { buildTree, filterItems, isActive, resolveNode, type CategoryNode } from
 import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
 import { eventBus } from '../server/event-bus.js';
 import { extractOrderIntent, stripWakeWord } from '../bot/intent.js';
+import { classify } from '../agent/intent.js';
+import { forgetFact, memoryContext, rememberFact } from '../agent/memory-client.js';
 import { sttConfigured, transcribe } from '../stt/whisper.js';
 import {
   balanceInfo,
@@ -133,6 +135,7 @@ export class WhatsAppClient {
   private readonly providers: ClientProviders;
   private readonly llmLastRequest = new Map<string, number>();
   private readonly userRate = new Map<string, { count: number; windowStart: number }>();
+  private readonly pendingOrders = new Map<string, { sku: string; target: string; qty: number; expiresAt: number }>();
   private priceCache?: { at: number; items: PriceListItem[] };
   private treeCache?: { at: number; tree: CategoryNode[] };
 
@@ -244,14 +247,7 @@ export class WhatsAppClient {
     const command = parseCommand(text, config.commandPrefix) ?? parseOrder(text, store.keyword);
 
     if (!command) {
-      const node = await this.resolveInput(text);
-      if (node) {
-        await this.browseNode(remoteJid, node.category, node.subcategory?.key, 'all');
-        return;
-      }
-      if (llmIsEnabled() && this.shouldAnswerFreeText(message, remoteJid, text)) {
-        await this.askLlm(remoteJid, text, name);
-      }
+      await this.handleFreeText(message, remoteJid, senderJid, name, text);
       return;
     }
 
@@ -418,6 +414,112 @@ export class WhatsAppClient {
       } as Parameters<WASocket['sendMessage']>[1]);
     } catch (error) {
       this.logger.debug({ error }, 'reaction failed');
+    }
+  }
+
+  /** Natural-language entry point: the AI decides what to do, no commands needed. */
+  private async handleFreeText(
+    message: WAMessage,
+    jid: string,
+    senderJid: string,
+    name: string,
+    text: string
+  ): Promise<void> {
+    const node = await this.resolveInput(text);
+    if (node && !this.pendingOrders.has(jid)) {
+      await this.browseNode(jid, node.category, node.subcategory?.key, 'all');
+      return;
+    }
+
+    const intent = classify(text);
+
+    if (intent.kind === 'remember') {
+      const saved = await rememberFact(intent.key, intent.value, ['auto']);
+      await this.reply(jid, saved
+        ? `🧠 Dah ingat.\n> ${intent.key}: ${intent.value}`
+        : '🧠 Memori belum disambung ke AI core.', { mentions: [senderJid] });
+      return;
+    }
+
+    if (intent.kind === 'forget') {
+      const removed = await forgetFact(intent.key);
+      await this.reply(jid, removed ? `🧠 Dah lupa: ${intent.key}` : `🧠 Tak jumpa memori: ${intent.key}`, { mentions: [senderJid] });
+      return;
+    }
+
+    const pending = this.pendingOrders.get(jid);
+
+    if (intent.kind === 'cancel' && pending) {
+      this.pendingOrders.delete(jid);
+      await this.reply(jid, '❌ Order dibatalkan.', { mentions: [senderJid] });
+      return;
+    }
+
+    if (intent.kind === 'confirm' && pending) {
+      this.pendingOrders.delete(jid);
+      if (pending.expiresAt < Date.now()) {
+        await this.reply(jid, '⌛ Order tamat tempoh. Ulang semula.', { mentions: [senderJid] });
+        return;
+      }
+      await this.executeOrder(jid, pending.sku, pending.target, pending.qty, false, { mentions: [senderJid] });
+      return;
+    }
+
+    if (intent.kind === 'order') {
+      if (!this.providers.digiflazz) {
+        await this.reply(jid, errors.digiflazzMissing(), { mentions: [senderJid] });
+        return;
+      }
+      const owner = this.isOwnerNow(jid, senderJid);
+      if (owner || store.orderAllowPublic) {
+        await this.executeOrder(jid, intent.sku, intent.target, intent.qty, false, { mentions: [senderJid] });
+        return;
+      }
+      const minutes = Number(process.env.ORDER_CONFIRM_TTL_MINUTES ?? 5);
+      this.pendingOrders.set(jid, {
+        sku: intent.sku,
+        target: intent.target,
+        qty: intent.qty,
+        expiresAt: Date.now() + Math.max(1, minutes) * 60_000
+      });
+      await this.reply(jid, [
+        '🛒〔 *SAHKAN ORDER* 〕🛒',
+        '',
+        `> SKU : \`${intent.sku}\``,
+        `> Target : ${intent.target}`,
+        `> Qty : ${intent.qty}x`,
+        '',
+        `Balas *ya* untuk teruskan (tamat ${minutes} minit) atau *batal*.`
+      ].join('\n'), { mentions: [senderJid] });
+      return;
+    }
+
+    if (intent.kind === 'status') {
+      if (!this.isOwnerNow(jid, senderJid)) {
+        await this.reply(jid, errors.ownerOnly(), { mentions: [senderJid] });
+        return;
+      }
+      await this.ownerCommand(jid, senderJid, 'status', [intent.refId]);
+      return;
+    }
+
+    if (intent.kind === 'search') {
+      await this.price(jid, intent.query);
+      return;
+    }
+
+    if (intent.kind === 'payment') {
+      await this.reply(jid, paymentInfo(), { mentions: [senderJid] });
+      return;
+    }
+
+    if (intent.kind === 'help') {
+      await this.sendMenu(jid, name);
+      return;
+    }
+
+    if (llmIsEnabled() && this.shouldAnswerFreeText(message, jid, text)) {
+      await this.askLlm(jid, text, name);
     }
   }
 
@@ -899,9 +1001,14 @@ export class WhatsAppClient {
     this.llmLastRequest.set(jid, now);
     const history = this.histories.get(jid) ?? [];
     try {
+      const remembered = await memoryContext(prompt);
       const answer = await this.providers.llm.complete({
         prompt,
-        context: [`Pelanggan: ${name}`, ...history].join('\n')
+        context: [
+          `Pelanggan: ${name}`,
+          ...(remembered ? [`Memori:\n${remembered}`] : []),
+          ...history
+        ].join('\n')
       });
       const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]
         .slice(-Math.max(2, config.llmHistoryLimit));
