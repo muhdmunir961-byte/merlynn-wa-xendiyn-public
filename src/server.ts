@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
+import QRCode from 'qrcode';
 import { config } from './config.js';
+import { getLatestQr } from './whatsapp/qr-store.js';
 
 type WebhookOptions = { secret?: string };
 
@@ -19,6 +21,15 @@ export async function startHealthServer(options: WebhookOptions = {}): Promise<F
   const app = Fastify({ logger: { level: config.logLevel } });
   app.addContentTypeParser('*', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
   app.get('/health', async () => ({ ok: true, service: 'merlynn-wa-xendiyn' }));
+
+  app.get('/qr', async (_request, reply) => {
+    const qr = getLatestQr();
+    if (!qr) return reply.code(404).send({ ok: false, error: 'No pending QR. Bot may already be linked.' });
+    const png = await QRCode.toBuffer(qr, { type: 'png', margin: 1, width: 320 });
+    return reply.type('image/png').send(png);
+  });
+
+  app.get('/qr/state', async () => ({ pending: Boolean(getLatestQr()) }));
   app.post('/webhooks/digiflazz', async (request, reply) => {
     const secret = options.secret?.trim();
     if (!secret) return reply.code(503).send({ ok: false, error: 'Webhook verification is not configured.' });

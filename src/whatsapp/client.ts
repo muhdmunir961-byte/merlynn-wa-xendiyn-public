@@ -6,7 +6,8 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
-import { clearLatestQr, setLatestQr } from './qr-store.js';
+import { clearLatestQr, getLatestQr, setLatestQr } from './qr-store.js';
+import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { claimGroupOwner } from '../bot/owner-claim.js';
 import { parseCommand, parseOrder } from '../bot/parser.js';
@@ -114,7 +115,10 @@ export class WhatsAppClient {
   }
 
   private onConnectionUpdate(update: { connection?: 'open' | 'close' | 'connecting'; qr?: string; lastDisconnect?: { error?: unknown } }): void {
-    if (update.qr) setLatestQr(update.qr);
+    if (update.qr) {
+      setLatestQr(update.qr);
+      void this.printQr(update.qr);
+    }
     if (update.connection === 'open') {
       clearLatestQr();
       this.logger.info('WhatsApp connected');
@@ -129,6 +133,16 @@ export class WhatsAppClient {
     this.reconnectTimer = setTimeout(() => {
       if (this.auth && !this.stopping) this.connect(this.auth.state);
     }, 3000);
+  }
+
+  private async printQr(qr: string): Promise<void> {
+    try {
+      const ascii = await QRCode.toString(qr, { type: 'terminal', small: true });
+      console.log('\nScan this WhatsApp QR code (expires quickly):\n');
+      console.log(ascii);
+    } catch (error) {
+      this.logger.warn({ error }, 'could not render QR to console');
+    }
   }
 
   private rateLimited(jid: string): boolean {
