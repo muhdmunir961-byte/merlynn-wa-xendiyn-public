@@ -16,9 +16,10 @@ export interface BotState {
   owners: Record<string, { jid: string; claimedAt: string }>;
   manualDeposits: Record<string, ManualDepositRecord>;
   languages?: Record<string, string>;
+  wording?: { name?: string; tagline?: string; greeting?: string };
 }
 
-const emptyState = (): BotState => ({ owners: {}, manualDeposits: {}, languages: {} });
+const emptyState = (): BotState => ({ owners: {}, manualDeposits: {}, languages: {}, wording: {} });
 
 export class JsonStore {
   private state: BotState = emptyState();
@@ -32,7 +33,8 @@ export class JsonStore {
       this.state = {
         owners: parsed.owners ?? {},
         manualDeposits: parsed.manualDeposits ?? {},
-        languages: parsed.languages ?? {}
+        languages: parsed.languages ?? {},
+        wording: parsed.wording ?? {}
       };
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -86,6 +88,20 @@ export class JsonStore {
     if (lang) languages[jid] = lang;
     else delete languages[jid];
     this.state.languages = languages;
+    await this.persist();
+  }
+
+  getWording(): BotState['wording'] {
+    return this.state.wording ?? {};
+  }
+
+  async setWording(patch: Partial<NonNullable<BotState['wording']>>): Promise<void> {
+    this.state.wording = { ...(this.state.wording ?? {}), ...patch };
+    await this.persist();
+  }
+
+  async resetWording(): Promise<void> {
+    this.state.wording = {};
     await this.persist();
   }
 

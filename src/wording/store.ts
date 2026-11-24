@@ -26,11 +26,24 @@ export const store = {
   }
 } as const;
 
-export interface Category {
-  key: string;
-  label: string;
-  needles: string[];
+export interface WordingOverride {
+  name?: string;
+  tagline?: string;
+  greeting?: string;
 }
+
+/** Runtime wording set by the owner via chat; overrides env defaults. */
+let wordingOverride: WordingOverride = {};
+
+export const applyWording = (override: WordingOverride): void => {
+  wordingOverride = { ...override };
+};
+
+export const currentWording = (): WordingOverride => ({ ...wordingOverride });
+
+const storeName = (): string => wordingOverride.name || store.name;
+const storeTagline = (): string => wordingOverride.tagline || store.tagline;
+
 
 /** Short store commands mapped to product keyword searches. */
 export const categories: Category[] = [
@@ -106,8 +119,8 @@ export const money = rupiah;
 export const divider = (): string => theme.line;
 
 export const banner = (): string => [
-  theme.header(store.name),
-  `   🌦️ ‧˚ʚ ${store.tagline} ɞ˚⋆  ⸝⸝\``
+  theme.header(storeName()),
+  `   🌦️ ‧˚ʚ ${storeTagline()} ɞ˚⋆  ⸝⸝\``
 ].join('\n');
 
 export const greetingHeader = (senderName: string): string => {
@@ -115,7 +128,7 @@ export const greetingHeader = (senderName: string): string => {
   return [
     banner(),
     '',
-    `ᐢ..ᐢ   ${clock.greeting} 🌤 @${senderName}`,
+    `ᐢ..ᐢ   ${wordingOverride.greeting || clock.greeting} 🌤 @${senderName}`,
     '',
     `╭╸ date ꠩ ${clock.date}`,
     `╰╸ time ꠩ ${clock.time}`
@@ -139,7 +152,7 @@ export const menu = (senderName: string, sections: MenuSection[]): string => {
     '',
     ...body,
     '',
-    theme.footer.replace('%STORE%', store.name)
+    theme.footer.replace("%STORE%", storeName())
   ].join('\n');
 };
 
@@ -220,7 +233,7 @@ export const catalogue = (summaries: BrandSummary[], senderName: string): string
     '',
     `${tr('catalogue.searchDirect')} \`${store.prefix}price [kata kunci]\``,
     '',
-    theme.footer.replace('%STORE%', store.name)
+    theme.footer.replace("%STORE%", storeName())
   ].join('\n');
 };
 
@@ -233,7 +246,7 @@ export const noProducts = (query: string): string => [
 
 export const paymentInfo = (): string => {
   const lines = [
-    'ᥫ᭡ ˖ ࣪ ‹ 𖥔 payment ‧˚ʚ ' + store.name + ' ɞ˚⋆｡',
+    'ᥫ᭡ ˖ ࣪ ‹ 𖥔 payment ‧˚ʚ ' + storeName() + ' ɞ˚⋆｡',
     theme.soft,
     '',
     ` - 𓊆 *${store.payment.qrisNote}* 𓊇`,
@@ -507,7 +520,7 @@ export const categoryOverview = (senderName: string, lines: CategoryLine[]): str
     tr('category.hint'),
     `${tr('category.example')} \`ml\` · \`pln\` · \`pulsa\``,
     '',
-    theme.footer.replace('%STORE%', store.name)
+    theme.footer.replace("%STORE%", storeName())
   ].join('\n');
 };
 

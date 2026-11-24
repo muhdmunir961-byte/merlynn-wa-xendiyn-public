@@ -20,8 +20,7 @@ import type { LlmProvider } from '../plugins/interfaces.js';
 import { OutgoingQueue } from './queue.js';
 import { loadAuth } from './auth.js';
 import { theme } from '../wording/theme.js';
-import { buildTree, filterItems, isActive, resolveNode, type CategoryNode } from '../catalog/tree.js';
-import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
+import { buildTree, filterItems, isActive, resolveNode, type CategoryNode } from '../catalog/tree.js';import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
 import { eventBus } from '../server/event-bus.js';
 import { extractOrderIntent, stripWakeWord } from '../bot/intent.js';
 import { classify } from '../agent/intent.js';
@@ -38,6 +37,8 @@ import {
   errors,
   filterNotice,
   howToOrder,
+  applyWording,
+  currentWording,
   menu,
   newRefId,
   noProducts,
@@ -133,6 +134,7 @@ export class WhatsAppClient {
   private readonly queue = new OutgoingQueue(config.outgoingMinDelayMs, config.outgoingJitterMs);
   private readonly logger = pino({ level: config.logLevel });
   private readonly histories = new Map<string, string[]>();
+  private readonly observed = new Map<string, string[]>();
   private readonly providers: ClientProviders;
   private readonly llmLastRequest = new Map<string, number>();
   private readonly userRate = new Map<string, { count: number; windowStart: number }>();
@@ -151,6 +153,7 @@ export class WhatsAppClient {
   async start(): Promise<void> {
     this.stopping = false;
     this.languages.restore(this.store_.listLanguages());
+    applyWording(this.store_.getWording() ?? {});
     this.auth = await loadAuth(config.authDir);
     this.connect(this.auth.state);
   }
@@ -193,6 +196,7 @@ export class WhatsAppClient {
       clearLatestQr();
       this.logger.info('WhatsApp connected');
       eventBus.emit('status', { connected: true });
+      void this.announceOnline();
       this.startPanel();
     }
     if (update.connection !== 'close' || this.stopping) return;
@@ -257,6 +261,7 @@ export class WhatsAppClient {
 
     const text = messageText(message);
     if (!text) return;
+    this.observe(remoteJid, name, text);
     eventBus.emit('message', { jid: remoteJid, sender: senderJid, name, text, at: Date.now() });
 
     const command = parseCommand(text, config.commandPrefix) ?? parseOrder(text, store.keyword);
@@ -289,6 +294,9 @@ export class WhatsAppClient {
       case 'lang':
       case 'bahasa':
         await this.switchLanguage(remoteJid, senderJid, command.args[0]);
+        return;
+      case 'wording':
+        await this.changeWording(remoteJid, senderJid, command.args);
         return;
       case 'claimowner':
         await this.claimOwner(remoteJid, senderJid);
@@ -544,12 +552,41 @@ export class WhatsAppClient {
     }
   }
 
+  /** Greets the main group when the bot comes online, in the group's language. */
+  private async announceOnline(): Promise<void> {
+    const jid = this.panelJid();
+    if (!jid || !this.socket) return;
+    const lang = this.languages.get(jid);
+    const clock = new Intl.DateTimeFormat('en-GB', {
+      timeZone: store.timezone, hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(new Date());
+    const text = runWithLang(lang, () => [
+      `🌸〔 *${store.name.toUpperCase()}* 〕🌸`,
+      '',
+      t(lang, 'greet.online'),
+      '',
+      `> ${t(lang, 'uptime.uptime')} : ${t(lang, 'panel.online')}`,
+      `> ${t(lang, 'panel.time')} : ${clock} ${t(lang, 'time.suffix')}`,
+      `> ${t(lang, 'panel.model')} : ${config.llmModel}`,
+      '',
+      t(lang, 'greet.callMe'),
+      t(lang, 'greet.examples'),
+      '',
+      theme.line
+    ].join('\n'));
+    try {
+      await this.sendText(jid, text);
+    } catch (error) {
+      this.logger.warn({ error }, 'announceOnline failed');
+    }
+  }
+
   private startPanel(): void {
     if ((process.env.PANEL_ENABLED ?? 'true').toLowerCase() === 'false') return;
     const jid = this.panelJid();
     if (!jid) return;
     if (this.panelTimer) clearInterval(this.panelTimer);
-    const minutes = Math.max(2, Number(process.env.PANEL_INTERVAL_MINUTES ?? 10) || 10);
+    const minutes = Math.max(2, Number(process.env.PANEL_INTERVAL_MINUTES ?? 360) || 360);
     void this.refreshPanel(jid);
     this.panelTimer = setInterval(() => void this.refreshPanel(jid), minutes * 60_000);
   }
@@ -579,7 +616,7 @@ export class WhatsAppClient {
       `> ${t(lang, 'panel.uptime')} : ${hours}j ${minutes}m`,
       `> ${t(lang, 'panel.ordersToday')} : ${this.ordersToday}`,
       `> ${t(lang, 'panel.time')} : ${clock} ${t(lang, 'time.suffix')}`,
-      `> ${t(lang, 'panel.model')} : ${process.env.LLM_MODEL ?? 'qwen2.5:0.5b'}`,
+      `> ${t(lang, 'panel.model')} : ${config.llmModel}`,
       '',
       t(lang, 'panel.hint'),
       t(lang, 'panel.orderHint', { keyword: store.keyword }),
@@ -602,7 +639,7 @@ export class WhatsAppClient {
           await this.socket.sendMessage(jid, {
             pin: this.panelKey,
             type: 1,
-            time: 86400
+            time: 21600
           } as Parameters<WASocket['sendMessage']>[1]);
         } catch {
           // pinning is best-effort; newer clients may reject it
@@ -658,6 +695,48 @@ export class WhatsAppClient {
     } catch {
       return '';
     }
+  }
+
+  /** `.wording <teks>` sets the shop tagline; `.wording reset` restores it. */
+  private async changeWording(jid: string, senderJid: string, args: string[]): Promise<void> {
+    if (!this.isOwnerNow(jid, senderJid)) {
+      await this.reply(jid, errors.ownerOnly(), { mentions: [senderJid] });
+      return;
+    }
+    const raw = args.join(' ').trim();
+    if (!raw) {
+      const current = currentWording();
+      const text = current.tagline || store.tagline;
+      await this.reply(jid, tr('wording.current', { text }) + '\n\n' + tr('wording.usage', { prefix: store.prefix }), {
+        mentions: [senderJid]
+      });
+      return;
+    }
+    if (raw.toLowerCase() === 'reset') {
+      await this.store_.resetWording();
+      applyWording({});
+      await this.reply(jid, tr('wording.reset'), { mentions: [senderJid] });
+      return;
+    }
+
+    // `nama: X` / `tagline: Y` / `salam: Z`, or a bare line that sets the tagline.
+    const patch: { name?: string; tagline?: string; greeting?: string } = {};
+    for (const part of raw.split('|')) {
+      const [label, ...rest] = part.split(':');
+      const value = rest.join(':').trim();
+      if (!value) continue;
+      const key = label.trim().toLowerCase();
+      if (['nama', 'name'].includes(key)) patch.name = value.slice(0, 60);
+      else if (['tagline', 'slogan'].includes(key)) patch.tagline = value.slice(0, 120);
+      else if (['salam', 'greeting'].includes(key)) patch.greeting = value.slice(0, 60);
+    }
+    if (!Object.keys(patch).length) patch.tagline = raw.slice(0, 120);
+
+    await this.store_.setWording(patch);
+    applyWording(this.store_.getWording() ?? {});
+    await this.reply(jid, tr('wording.saved', {
+      text: patch.tagline ?? patch.name ?? patch.greeting ?? raw
+    }), { mentions: [senderJid] });
   }
 
   private async priceItems(): Promise<PriceListItem[]> {
@@ -834,7 +913,8 @@ export class WhatsAppClient {
           `${store.prefix}syarat — ${tr('menu.item.terms')}`,
           `${store.prefix}owner — ${tr('menu.item.owner')}`,
           `${store.prefix}status [trxid] — ${tr('menu.item.status')}`,
-          `${store.prefix}lang id|en — ${tr('menu.item.lang')}`
+          `${store.prefix}lang id|en — ${tr('menu.item.lang')}`,
+          `${store.prefix}wording [teks] — ubah tagline kedai`
         ]
       },
       {
@@ -1131,12 +1211,34 @@ export class WhatsAppClient {
     return id.split('@')[0]?.split(':')[0] ?? '';
   }
 
-  /** Group chats only get free-text AI replies when the bot is tagged or quoted. */
+  /** Rolling transcript so the AI can read the room, not just the tagged line. */
+  private observe(jid: string, name: string, text: string): void {
+    const line = `${name}: ${oneLine(text).slice(0, 160)}`;
+    const buffer = this.observed.get(jid) ?? [];
+    buffer.push(line);
+    this.observed.set(jid, buffer.slice(-12));
+  }
+
+  private recentChatter(jid: string): string {
+    return (this.observed.get(jid) ?? []).join('\n');
+  }
+
+  /** True when the text starts with or contains a configured wake word. */
+  private hasWakeWord(text: string): boolean {
+    const lower = text.toLowerCase();
+    return config.wakeWords.some((word) => {
+      const pattern = new RegExp(`(^|[^a-z])${word}([^a-z]|$)`, 'i');
+      return pattern.test(lower);
+    });
+  }
+
+  /** Group chats only get free-text AI replies when called by name, tagged or quoted. */
   private shouldAnswerFreeText(message: WAMessage, jid: string, text: string): boolean {
     if (!jid.endsWith('@g.us')) return true;
-    const mode = (process.env.GROUP_AI_MODE ?? 'mention').toLowerCase();
+    const mode = (process.env.GROUP_AI_MODE ?? 'wake').toLowerCase();
     if (mode === 'off') return false;
     if (mode === 'all') return true;
+    if (this.hasWakeWord(text)) return true;
 
     const self = this.selfNumber();
     if (!self) return false;
@@ -1174,11 +1276,13 @@ export class WhatsAppClient {
     const history = this.histories.get(jid) ?? [];
     try {
       const remembered = await memoryContext(prompt);
+      const room = this.recentChatter(jid);
       const answer = await this.providers.llm.complete({
         prompt,
         context: [
-          ...(remembered ? [remembered.slice(0, 120)] : []),
-          ...history.slice(-2)
+          ...(room ? [`Obrolan grup terkini:\n${room}`] : []),
+          ...(remembered ? [remembered.slice(0, 200)] : []),
+          ...history.slice(-3)
         ].join('\n')
       });
       const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]

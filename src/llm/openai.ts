@@ -8,7 +8,8 @@ const MAX_CONTEXT_CHARS = 200;
 
 // Byte-identical on every call so the server prompt cache always hits.
 const DEFAULT_SYSTEM_PROMPT =
-  'Kamu Merlynn, asisten toko top-up. Jawab 1-2 kalimat singkat, ikut bahasa user, jangan mengarang harga.';
+  'Kamu Merlynn, asisten toko top-up di WhatsApp. Ramah, hangat, ringkas (1-3 kalimat), dan selalu siap membantu. ' +
+  'Ikuti bahasa user. Jangan mengarang harga, stok atau kode produk.',
 
 const LANG_LINE: Record<'id' | 'en' | 'ms', string> = {
   id: ' (Indonesia).',
@@ -62,7 +63,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.apiKey = env('LLM_API_KEY');
     this.systemPrompt = env('LLM_SYSTEM_PROMPT') || DEFAULT_SYSTEM_PROMPT;
     this.timeoutMs = Number(env('LLM_TIMEOUT_MS', String(DEFAULT_TIMEOUT_MS))) || DEFAULT_TIMEOUT_MS;
-    this.deadlineMs = Number(env('LLM_DEADLINE_MS', '2000')) || 2000;
+    this.deadlineMs = Number(env('LLM_DEADLINE_MS', '20000')) || 20000;
     this.fallbackUrl = env('LLM_FALLBACK_URL').replace(/\/$/, '');
     this.fallbackModel = env('LLM_FALLBACK_MODEL') || this.model;
     const mode = env('LLM_LANG', 'auto').toLowerCase();
@@ -152,7 +153,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         model,
         stream: false,
         temperature: 0.7,
-        max_tokens: 12,
+        max_tokens: 320,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent }

@@ -21,6 +21,12 @@ export const config = {
   digiflazzBaseUrl: process.env.DIGIFLAZZ_BASE_URL ?? 'https://api.digiflazz.com/v1',
   digiflazzWebhookSecret: process.env.DIGIFLAZZ_WEBHOOK_SECRET ?? '',
   llmEnabled: process.env.LLM_ENABLED ?? 'false',
-  llmRateLimitMs: number(process.env.LLM_RATE_LIMIT_MS, 15_000),
-  llmHistoryLimit: number(process.env.LLM_HISTORY_LIMIT, 6)
+  llmRateLimitMs: number(process.env.LLM_RATE_LIMIT_MS, 3_000),
+  llmHistoryLimit: number(process.env.LLM_HISTORY_LIMIT, 8),
+  llmModel: (process.env.LLM_MODEL ?? 'deepseek-v4.1-flash').trim(),
+  llmBaseUrl: (process.env.LLM_BASE_URL ?? 'https://griphubrouter.web.id').trim(),
+  wakeWords: (process.env.BOT_WAKE_WORDS ?? 'bot,merlynn,merlyn,merlin')
+    .split(',')
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean)
 } as const;

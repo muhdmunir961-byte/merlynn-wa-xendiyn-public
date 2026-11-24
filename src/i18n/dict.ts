@@ -207,6 +207,15 @@ const id: Dict = {
   'panel.hint': 'Ketik apa saja — AI mengerti. Cth: `ada ml 500 tak?`',
   'panel.orderHint': 'Order: `{keyword} [kode] [target]`',
 
+  'greet.online': 'Merlynn sudah online dan siap melayani kak! 🌷',
+  'greet.callMe': 'Panggil saya dengan *bot*, *merlynn*, *merlyn*, atau *tag* saya.',
+  'greet.examples': 'Cth: `bot ada ml 500?` · `merlynn cara order` · `@merlynn halo`',
+
+  'wording.usage': 'Ganti teks: `{prefix}wording [teks baru]`\nReset: `{prefix}wording reset`',
+  'wording.saved': '✅ Wording disimpan.\n> {text}',
+  'wording.reset': '✅ Wording kembali ke asal.',
+  'wording.current': 'Wording sekarang:\n> {text}',
+
   'webhook.update': 'Update Transaksi',
   'webhook.waiting': 'Update Transaksi',
   'webhook.product': 'Produk',
@@ -415,6 +424,15 @@ const en: Dict = {
   'panel.model': 'Model',
   'panel.hint': 'Just type anything — the AI understands. e.g. `do you have ml 500?`',
   'panel.orderHint': 'Order: `{keyword} [code] [target]`',
+
+  'greet.online': 'Merlynn is online and ready to help! 🌷',
+  'greet.callMe': 'Call me with *bot*, *merlynn*, *merlyn*, or just *tag* me.',
+  'greet.examples': 'e.g. `bot do you have ml 500?` · `merlynn how to order` · `@merlynn hi`',
+
+  'wording.usage': 'Change text: `{prefix}wording [new text]`\nReset: `{prefix}wording reset`',
+  'wording.saved': '✅ Wording saved.\n> {text}',
+  'wording.reset': '✅ Wording restored to default.',
+  'wording.current': 'Current wording:\n> {text}',
 
   'webhook.update': 'Transaction Update',
   'webhook.waiting': 'Transaction Update',
