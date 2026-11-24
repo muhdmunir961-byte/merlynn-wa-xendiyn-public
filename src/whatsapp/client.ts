@@ -249,7 +249,9 @@ export class WhatsAppClient {
         await this.browseNode(remoteJid, node.category, node.subcategory?.key, 'all');
         return;
       }
-      if (llmIsEnabled()) await this.askLlm(remoteJid, text, name);
+      if (llmIsEnabled() && this.shouldAnswerFreeText(message, remoteJid, text)) {
+        await this.askLlm(remoteJid, text, name);
+      }
       return;
     }
 
@@ -848,6 +850,35 @@ export class WhatsAppClient {
     } catch (error) {
       await this.reply(jid, errors.requestFailed(error instanceof Error ? error.message : 'order gagal'));
     }
+  }
+
+  private selfNumber(): string {
+    const id = this.socket?.user?.id ?? '';
+    return id.split('@')[0]?.split(':')[0] ?? '';
+  }
+
+  /** Group chats only get free-text AI replies when the bot is tagged or quoted. */
+  private shouldAnswerFreeText(message: WAMessage, jid: string, text: string): boolean {
+    if (!jid.endsWith('@g.us')) return true;
+    const mode = (process.env.GROUP_AI_MODE ?? 'mention').toLowerCase();
+    if (mode === 'off') return false;
+    if (mode === 'all') return true;
+
+    const self = this.selfNumber();
+    if (!self) return false;
+    if (text.toLowerCase().startsWith(this.selfNumber())) return true;
+
+    const content = message.message;
+    const context = content?.extendedTextMessage?.contextInfo
+      ?? content?.imageMessage?.contextInfo
+      ?? content?.videoMessage?.contextInfo
+      ?? content?.documentMessage?.contextInfo;
+
+    const normalise = (value: string | undefined): string => (value ?? '').split('@')[0]?.split(':')[0] ?? '';
+
+    if ((context?.mentionedJid ?? []).some((mentioned) => normalise(mentioned) === self)) return true;
+    if (normalise(context?.participant) === self) return true;
+    return false;
   }
 
   private async askLlm(jid: string, prompt: string, name: string): Promise<void> {
