@@ -203,8 +203,12 @@ export class WhatsAppClient {
       clearLatestQr();
       this.logger.info('WhatsApp connected');
       eventBus.emit('status', { connected: true });
-      void this.announceOnline();
-      this.startPanel();
+      // Baileys finishes its init queries a moment after 'open'; sending too
+      // early is silently dropped, so wait before the first panel/greeting.
+      setTimeout(() => {
+        void this.announceOnline();
+        this.startPanel();
+      }, 6000);
     }
     if (update.connection !== 'close' || this.stopping) return;
     eventBus.emit('status', { connected: false });
@@ -583,6 +587,7 @@ export class WhatsAppClient {
     ].join('\n'));
     try {
       await this.sendText(jid, text);
+      this.logger.info({ jid }, 'announceOnline sent');
     } catch (error) {
       this.logger.warn({ error }, 'announceOnline failed');
     }
@@ -653,6 +658,7 @@ export class WhatsAppClient {
         }
       }
       eventBus.emit('log', { level: 'info', message: 'panel refreshed' });
+      this.logger.info({ jid, pinned: Boolean(this.panelKey) }, 'panel refreshed');
     } catch (error) {
       this.logger.warn({ error }, 'panel refresh failed');
     }
@@ -1292,6 +1298,7 @@ export class WhatsAppClient {
           ...history.slice(-3)
         ].join('\n')
       });
+      this.logger.info({ jid, chars: answer.length }, 'llm answered');
       const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]
         .slice(-Math.max(2, config.llmHistoryLimit));
       this.histories.set(jid, next);
