@@ -57,6 +57,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   private readonly fallbackUrl: string;
   private readonly fallbackModel: string;
   private readonly langMode: 'auto' | 'id' | 'en' | 'ms';
+  private readonly preferNode: boolean;
+  private healthyUntil = 0;
 
   constructor() {
     this.enabled = isEnabled(process.env.LLM_ENABLED);
@@ -69,6 +71,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.fallbackModel = env('LLM_FALLBACK_MODEL') || this.model;
     const mode = env('LLM_LANG', 'auto').toLowerCase();
     this.langMode = mode === 'id' || mode === 'en' || mode === 'ms' ? mode : 'auto';
+    this.preferNode = isEnabled(env('LLM_PREFER_FALLBACK'));
   }
 
   isEnabled(): boolean {
@@ -86,6 +89,16 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const lang = this.langMode === 'auto' ? detectLang(prompt) : this.langMode;
     const system = `${this.systemPrompt} ${LANG_LINE[lang]}`;
 
+    // Prefer the fast node (phone/Termux) when it is reachable; fall back to the
+    // always-on VPS endpoint. Probe is cached so we do not pay it per message.
+    if (this.fallbackUrl && this.preferFallback() && (await this.fallbackHealthy())) {
+      try {
+        return await this.request(this.fallbackUrl, this.fallbackModel, system, userContent);
+      } catch {
+        this.healthyUntil = 0;
+      }
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -98,6 +111,29 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         throw error instanceof Error ? error : new Error('LLM request gagal');
       }
       return await this.request(this.fallbackUrl, this.fallbackModel, system, userContent);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private preferFallback(): boolean {
+    if (!this.preferNode) return false;
+    return this.healthyUntil > Date.now();
+  }
+
+  /** Cheap reachability probe, cached for HEALTH_TTL_MS. */
+  private async fallbackHealthy(): Promise<boolean> {
+    if (this.healthyUntil > Date.now()) return true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      const response = await fetch(`${this.fallbackUrl}/v1/models`, { signal: controller.signal });
+      const ok = response.ok;
+      this.healthyUntil = ok ? Date.now() + 30_000 : 0;
+      return ok;
+    } catch {
+      this.healthyUntil = 0;
+      return false;
     } finally {
       clearTimeout(timer);
     }
