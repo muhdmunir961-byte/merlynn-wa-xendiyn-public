@@ -644,6 +644,22 @@ export class WhatsAppClient {
     if (this.panelTimer) this.startPanel();
   }
 
+  /** Real catalogue rows for the prompt, so the model never invents prices. */
+  private async productContext(prompt: string): Promise<string> {
+    if (!this.providers.digiflazz) return '';
+    const query = prompt.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+    try {
+      const items = await this.priceItems();
+      const matches = filterItems(items, { query }).slice(0, 5);
+      if (!matches.length) return '';
+      return matches
+        .map((item) => `- ${item.name} | kode ${item.code} | Rp ${item.price.toLocaleString('id-ID')} | ${item.ready ? 'aktif' : 'gangguan'}`)
+        .join('\n');
+    } catch {
+      return '';
+    }
+  }
+
   private async priceItems(): Promise<PriceListItem[]> {
     if (!this.providers.digiflazz) throw new Error('Digiflazz belum dikonfigurasi');
     const cached = this.priceCache;
@@ -1158,10 +1174,12 @@ export class WhatsAppClient {
     const history = this.histories.get(jid) ?? [];
     try {
       const remembered = await memoryContext(prompt);
+      const catalogue = await this.productContext(prompt);
       const answer = await this.providers.llm.complete({
         prompt,
         context: [
           `Pelanggan: ${name}`,
+          ...(catalogue ? [`Produk sebenar dari katalog:\n${catalogue}`] : []),
           ...(remembered ? [`Memori:\n${remembered}`] : []),
           ...history
         ].join('\n')
