@@ -25,6 +25,7 @@ import { rowIdToCommand, sendList } from '../utils/uiMessage.js';
 import { eventBus } from '../server/event-bus.js';
 import { extractOrderIntent, stripWakeWord } from '../bot/intent.js';
 import { classify } from '../agent/intent.js';
+import { defaultLang, LanguageRegistry, normalizeLang, runWithLang, SUPPORTED_LANGS, t, tr } from '../i18n/index.js';
 import { forgetFact, memoryContext, rememberFact } from '../agent/memory-client.js';
 import { sttConfigured, transcribe } from '../stt/whisper.js';
 import {
@@ -136,6 +137,7 @@ export class WhatsAppClient {
   private readonly llmLastRequest = new Map<string, number>();
   private readonly userRate = new Map<string, { count: number; windowStart: number }>();
   private readonly pendingOrders = new Map<string, { sku: string; target: string; qty: number; expiresAt: number }>();
+  private readonly languages = new LanguageRegistry(defaultLang());
   private panelTimer?: ReturnType<typeof setInterval>;
   private panelKey?: WAMessage['key'];
   private ordersToday = 0;
@@ -148,6 +150,7 @@ export class WhatsAppClient {
 
   async start(): Promise<void> {
     this.stopping = false;
+    this.languages.restore(this.store_.listLanguages());
     this.auth = await loadAuth(config.authDir);
     this.connect(this.auth.state);
   }
@@ -233,6 +236,13 @@ export class WhatsAppClient {
   }
 
   private async handleMessage(message: WAMessage): Promise<void> {
+    const jid = message.key.remoteJid;
+    if (!jid || jid === 'status@broadcast' || message.key.fromMe) return;
+    const lang = this.languages.get(jid);
+    await runWithLang(lang, () => this.routeMessage(message));
+  }
+
+  private async routeMessage(message: WAMessage): Promise<void> {
     const remoteJid = message.key.remoteJid;
     if (!remoteJid || remoteJid === 'status@broadcast' || message.key.fromMe) return;
     if (this.rateLimited(remoteJid)) return;
@@ -274,7 +284,11 @@ export class WhatsAppClient {
         await this.reply(remoteJid, uptimeInfo(Date.now() - this.startedAt.getTime(), this.startedAt.toISOString(), theme.name));
         return;
       case 'id':
-        await this.reply(remoteJid, `🆔 *Chat ID*\n> JID : ${remoteJid}\n> Kamu : ${senderJid}`);
+        await this.reply(remoteJid, `🆔 *Chat ID*\n> JID : ${remoteJid}\n> ${tr('staff.name')} : ${senderJid}`);
+        return;
+      case 'lang':
+      case 'bahasa':
+        await this.switchLanguage(remoteJid, senderJid, command.args[0]);
         return;
       case 'claimowner':
         await this.claimOwner(remoteJid, senderJid);
@@ -385,10 +399,10 @@ export class WhatsAppClient {
     if (!intent) {
       await this.react(message, '🤔');
       await this.reply(jid, [
-        '🎙️〔 *TIDAK FAHAM* 〕🎙️',
+        '🎙️〔 *' + tr('error.voiceNotUnderstood') + '* 〕🎙️',
         '',
-        `> Dengar: _${oneLine(transcript)}_`,
-        `> Cuba: \`${store.keyword} order MLID500 12345678\``
+        `> ${tr('error.heard')} : _${oneLine(transcript)}_`,
+        `> ${tr('error.tryWith')} : \`${store.keyword} order MLID500 12345678\``
       ].join('\n'), { mentions: [senderJid] });
       return;
     }
@@ -441,14 +455,16 @@ export class WhatsAppClient {
     if (intent.kind === 'remember') {
       const saved = await rememberFact(intent.key, intent.value, ['auto']);
       await this.reply(jid, saved
-        ? `🧠 Dah ingat.\n> ${intent.key}: ${intent.value}`
-        : '🧠 Memori belum disambung ke AI core.', { mentions: [senderJid] });
+        ? tr('memory.saved', { key: intent.key, value: intent.value })
+        : tr('memory.notLinked'), { mentions: [senderJid] });
       return;
     }
 
     if (intent.kind === 'forget') {
       const removed = await forgetFact(intent.key);
-      await this.reply(jid, removed ? `🧠 Dah lupa: ${intent.key}` : `🧠 Tak jumpa memori: ${intent.key}`, { mentions: [senderJid] });
+      await this.reply(jid, removed
+        ? tr('memory.forgotten', { key: intent.key })
+        : tr('memory.notFound', { key: intent.key }), { mentions: [senderJid] });
       return;
     }
 
@@ -456,14 +472,14 @@ export class WhatsAppClient {
 
     if (intent.kind === 'cancel' && pending) {
       this.pendingOrders.delete(jid);
-      await this.reply(jid, '❌ Order dibatalkan.', { mentions: [senderJid] });
+      await this.reply(jid, tr('order.confirm.cancelled'), { mentions: [senderJid] });
       return;
     }
 
     if (intent.kind === 'confirm' && pending) {
       this.pendingOrders.delete(jid);
       if (pending.expiresAt < Date.now()) {
-        await this.reply(jid, '⌛ Order tamat tempoh. Ulang semula.', { mentions: [senderJid] });
+        await this.reply(jid, tr('order.confirm.expired'), { mentions: [senderJid] });
         return;
       }
       await this.executeOrder(jid, pending.sku, pending.target, pending.qty, false, { mentions: [senderJid] });
@@ -488,13 +504,13 @@ export class WhatsAppClient {
         expiresAt: Date.now() + Math.max(1, minutes) * 60_000
       });
       await this.reply(jid, [
-        '🛒〔 *SAHKAN ORDER* 〕🛒',
+        '🛒〔 *' + tr('order.confirm.title') + '* 〕🛒',
         '',
-        `> SKU : \`${intent.sku}\``,
-        `> Target : ${intent.target}`,
-        `> Qty : ${intent.qty}x`,
+        `> ${tr('order.confirm.sku')} : \`${intent.sku}\``,
+        `> ${tr('order.confirm.target')} : ${intent.target}`,
+        `> ${tr('order.confirm.qty')} : ${intent.qty}x`,
         '',
-        `Balas *ya* untuk teruskan (tamat ${minutes} minit) atau *batal*.`
+        tr('order.confirm.ask', { minutes })
       ].join('\n'), { mentions: [senderJid] });
       return;
     }
@@ -530,12 +546,19 @@ export class WhatsAppClient {
 
   private startPanel(): void {
     if ((process.env.PANEL_ENABLED ?? 'true').toLowerCase() === 'false') return;
-    const jid = (process.env.PANEL_JID ?? '').trim();
+    const jid = this.panelJid();
     if (!jid) return;
     if (this.panelTimer) clearInterval(this.panelTimer);
     const minutes = Math.max(2, Number(process.env.PANEL_INTERVAL_MINUTES ?? 10) || 10);
     void this.refreshPanel(jid);
     this.panelTimer = setInterval(() => void this.refreshPanel(jid), minutes * 60_000);
+  }
+
+  /** Group that receives the live panel: PANEL_JID, else the first claimed group. */
+  private panelJid(): string {
+    const explicit = (process.env.PANEL_JID ?? '').trim();
+    if (explicit) return explicit;
+    return this.store_.ownerGroups()[0] ?? '';
   }
 
   /** Keeps one live status panel in the main group: delete old, send new, pin. */
@@ -547,21 +570,22 @@ export class WhatsAppClient {
     const seconds = Math.floor((Date.now() - this.startedAt.getTime()) / 1000);
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
+    const lang = this.languages.get(jid);
 
-    const text = [
-      `📌〔 *${store.name.toUpperCase()} · LIVE PANEL* 〕📌`,
+    const text = runWithLang(lang, () => [
+      `📌〔 *${store.name.toUpperCase()} · ${t(lang, 'panel.title')}* 〕📌`,
       '',
-      `> Status : Online ✅`,
-      `> Uptime : ${hours}j ${minutes}m`,
-      `> Order hari ini : ${this.ordersToday}`,
-      `> Masa : ${clock} WIB`,
-      `> Model : ${process.env.LLM_MODEL ?? 'qwen2.5:0.5b'}`,
+      `> ${t(lang, 'panel.status')} : ${t(lang, 'panel.online')}`,
+      `> ${t(lang, 'panel.uptime')} : ${hours}j ${minutes}m`,
+      `> ${t(lang, 'panel.ordersToday')} : ${this.ordersToday}`,
+      `> ${t(lang, 'panel.time')} : ${clock} ${t(lang, 'time.suffix')}`,
+      `> ${t(lang, 'panel.model')} : ${process.env.LLM_MODEL ?? 'qwen2.5:0.5b'}`,
       '',
-      `Taip apa-apa sahaja — AI faham. Cth: \`ada ml 500 tak?\``,
-      `Order: \`merlynn [kode] [target]\``,
+      t(lang, 'panel.hint'),
+      t(lang, 'panel.orderHint', { keyword: store.keyword }),
       '',
       theme.line
-    ].join('\n');
+    ].join('\n'));
 
     try {
       if (this.panelKey) {
@@ -588,6 +612,36 @@ export class WhatsAppClient {
     } catch (error) {
       this.logger.warn({ error }, 'panel refresh failed');
     }
+  }
+
+  /** `.lang id|en` or `.lang` to show the current language. */
+  private async switchLanguage(jid: string, senderJid: string, raw?: string): Promise<void> {
+    const requested = normalizeLang(raw);
+    if (!raw) {
+      const current = this.languages.get(jid);
+      await this.reply(jid, [
+        t(current, 'lang.current', { lang: current === 'id' ? 'Indonesia' : 'English' }),
+        '',
+        t(current, 'lang.hint', { prefix: store.prefix })
+      ].join('\n'), { mentions: [senderJid] });
+      return;
+    }
+    if (!requested) {
+      const current = this.languages.get(jid);
+      await this.reply(jid, t(current, 'lang.unknown', {
+        value: raw,
+        options: SUPPORTED_LANGS.join(', ')
+      }), { mentions: [senderJid] });
+      return;
+    }
+
+    this.languages.set(jid, requested);
+    await this.store_.setLanguage(jid, requested);
+    await this.reply(jid, t(requested, 'lang.changed', {
+      lang: requested === 'id' ? 'Indonesia' : 'English'
+    }), { mentions: [senderJid] });
+
+    if (this.panelTimer) this.startPanel();
   }
 
   private async priceItems(): Promise<PriceListItem[]> {
@@ -825,24 +879,25 @@ export class WhatsAppClient {
     event: string,
     data: { refId?: string; status?: string; product?: string; customer?: string; serial?: string; price?: number; message?: string }
   ): Promise<void> {
-    const target = (process.env.PANEL_JID ?? '').trim();
+    const target = this.panelJid();
     if (!target || !this.socket) return;
+    const lang = this.languages.get(target);
     const status = (data.status ?? '').toLowerCase();
     const head = status.includes('sukses') || status.includes('success')
-      ? '✅ Update Transaksi'
+      ? '✅ '
       : status.includes('gagal') || status.includes('fail')
-        ? '⚠️ Update Transaksi'
-        : '⏳ Update Transaksi';
+        ? '⚠️ '
+        : '⏳ ';
     const lines = [
-      `${head} (${event})`,
+      `${head}${t(lang, 'webhook.update')} (${event})`,
       '',
-      data.product ? `> Produk : ${data.product}` : '',
-      data.customer ? `> Tujuan : ${data.customer}` : '',
-      data.refId ? `> Ref : \`${data.refId}\`` : '',
-      data.status ? `> Status : ${data.status}` : '',
-      data.serial ? `> SN : \`${data.serial}\`` : '',
-      data.price ? `> Harga : Rp ${data.price.toLocaleString('id-ID')}` : '',
-      data.message ? `> Pesan : ${oneLine(data.message)}` : ''
+      data.product ? `> ${t(lang, 'webhook.product')} : ${data.product}` : '',
+      data.customer ? `> ${t(lang, 'webhook.target')} : ${data.customer}` : '',
+      data.refId ? `> ${t(lang, 'webhook.ref')} : \`${data.refId}\`` : '',
+      data.status ? `> ${t(lang, 'webhook.status')} : ${data.status}` : '',
+      data.serial ? `> ${t(lang, 'webhook.serial')} : \`${data.serial}\`` : '',
+      data.price ? `> ${t(lang, 'webhook.price')} : Rp ${data.price.toLocaleString('id-ID')}` : '',
+      data.message ? `> ${t(lang, 'webhook.message')} : ${oneLine(data.message)}` : ''
     ].filter(Boolean);
     try {
       await this.sendText(target, lines.join('\n'));

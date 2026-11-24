@@ -15,9 +15,10 @@ export interface ManualDepositRecord {
 export interface BotState {
   owners: Record<string, { jid: string; claimedAt: string }>;
   manualDeposits: Record<string, ManualDepositRecord>;
+  languages?: Record<string, string>;
 }
 
-const emptyState = (): BotState => ({ owners: {}, manualDeposits: {} });
+const emptyState = (): BotState => ({ owners: {}, manualDeposits: {}, languages: {} });
 
 export class JsonStore {
   private state: BotState = emptyState();
@@ -30,7 +31,8 @@ export class JsonStore {
       const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<BotState>;
       this.state = {
         owners: parsed.owners ?? {},
-        manualDeposits: parsed.manualDeposits ?? {}
+        manualDeposits: parsed.manualDeposits ?? {},
+        languages: parsed.languages ?? {}
       };
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -45,6 +47,10 @@ export class JsonStore {
 
   listOwners(): Array<BotState['owners'][string]> {
     return Object.values(this.state.owners);
+  }
+
+  ownerGroups(): string[] {
+    return Object.keys(this.state.owners);
   }
 
   getManualDeposit(id: string): ManualDepositRecord | undefined {
@@ -65,6 +71,22 @@ export class JsonStore {
     this.state.owners[groupJid] = { jid, claimedAt: new Date().toISOString() };
     await this.persist();
     return true;
+  }
+
+  getLanguage(jid: string): string | undefined {
+    return this.state.languages?.[jid];
+  }
+
+  listLanguages(): Record<string, string> {
+    return this.state.languages ?? {};
+  }
+
+  async setLanguage(jid: string, lang: string | null): Promise<void> {
+    const languages = this.state.languages ?? {};
+    if (lang) languages[jid] = lang;
+    else delete languages[jid];
+    this.state.languages = languages;
+    await this.persist();
   }
 
   private async persist(): Promise<void> {

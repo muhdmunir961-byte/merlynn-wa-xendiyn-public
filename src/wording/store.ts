@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { theme } from './theme.js';
+import { LANG_LABELS, SUPPORTED_LANGS, normalizeLang, tr, type Lang } from '../i18n/index.js';
 
 const env = (key: string, fallback = ''): string => (process.env[key] ?? fallback).trim();
 
@@ -12,6 +13,7 @@ export const store = {
   rules: env('STORE_RULES', ''),
   prefix: env('COMMAND_PREFIX', '.'),
   timezone: env('STORE_TIMEZONE', 'Asia/Jakarta'),
+  lang: (normalizeLang(env('STORE_LANG', 'id')) ?? 'id') as Lang,
   orderAllowPublic: ['true', '1', 'yes'].includes(env('ORDER_ALLOW_PUBLIC', 'false').toLowerCase()),
   maxQty: Math.max(1, Number(env('ORDER_MAX_QTY', '5')) || 5),
   payment: {
@@ -85,10 +87,16 @@ const now = (): { date: string; time: string; greeting: string } => {
 
   const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
   const hour = Number(get('hour'));
-  const greeting = hour < 11 ? 'Selamat Pagi' : hour < 15 ? 'Selamat Siang' : hour < 18 ? 'Selamat Sore' : 'Selamat Malam';
+  const greeting = hour < 11
+    ? tr('greet.morning')
+    : hour < 15
+      ? tr('greet.noon')
+      : hour < 18
+        ? tr('greet.evening')
+        : tr('greet.night');
   return {
     date: `${get('day')}/${get('month')}/${get('year')}`,
-    time: `${get('hour')}:${get('minute')}:${get('second')} WIB`,
+    time: `${get('hour')}:${get('minute')}:${get('second')} ${tr('time.suffix')}`,
     greeting
   };
 };
@@ -152,16 +160,16 @@ export const productBlock = (product: ProductView): string => [
 
 export const productList = (brand: string, products: ProductView[], keyword: string): string => {
   const head = [
-    `───═[ *${brand.toUpperCase()}* ]═───`,
+    `──═[ *${brand.toUpperCase()}* ]═──`,
     '',
-    `Order Ketik : \`${keyword} [kode] [target]\``,
-    `Contoh Order : \`${keyword} ${products[0]?.code ?? 'SKU'} 12345678\``,
-    `Contoh Isi 2x : \`${keyword} ${products[0]?.code ?? 'SKU'} 12345678 2x\``
+    `${tr('list.orderHint')} : \`${keyword} [kode] [target]\``,
+    `${tr('list.orderExample')} : \`${keyword} ${products[0]?.code ?? 'SKU'} 12345678\``,
+    `${tr('list.qtyExample')} : \`${keyword} ${products[0]?.code ?? 'SKU'} 12345678 2x\``
   ].join('\n');
 
   const body = products.map((product) => [theme.line, '', productBlock(product)].join('\n')).join('\n\n');
 
-  return [head, '', body, '', theme.line, '', `Ada ${products.length} produk ditampilkan.`].join('\n');
+  return [head, '', body, '', theme.line, '', tr('list.count', { count: products.length })].join('\n');
 };
 
 export interface BrandSummary {
@@ -199,27 +207,27 @@ export const catalogue = (summaries: BrandSummary[], senderName: string): string
     .map((summary) => `${summary.brand} (${summary.count})`);
 
   if (other.length) {
-    lines.push(`   ${theme.bullet} Lain-lain — ${other.join(', ')}`);
+    lines.push(`   ${theme.bullet} ${tr('catalogue.other')} — ${other.join(', ')}`);
   }
 
   return [
     header,
     ...lines,
     '',
-    'Buka kategori (tanpa prefix):',
+    tr('catalogue.openCategory'),
     ...categories.slice(0, 12).map((category) => `   • ${category.key}`).join(' ')
       .split('\n'),
     '',
-    `Atau cari terus: \`${store.prefix}price [kata kunci]\``,
+    `${tr('catalogue.searchDirect')} \`${store.prefix}price [kata kunci]\``,
     '',
     theme.footer.replace('%STORE%', store.name)
   ].join('\n');
 };
 
 export const noProducts = (query: string): string => [
-  `╭╸ ⃘✿ *produk tidak dijumpai*`,
-  `│ Carian : ${query || '-'}`,
-  '│ Cuba kata kunci lain, cth: `ml`, `pubg`, `telkomsel`',
+  `╭╸ ⃘✿ *${tr('noProducts.title')}*`,
+  `│ ${tr('noProducts.query')} : ${query || '-'}`,
+  `│ ${tr('noProducts.hint')}`,
   `╰╸ ֹ ${store.prefix}price [kata kunci]`
 ].join('\n');
 
@@ -240,10 +248,10 @@ export const paymentInfo = (): string => {
     '',
     '🏷️ 𝗇𝝾𝘁𝗲 ⦂',
     ` 𖥻 ̨𖥔 ִ ་ ، tf bank ke e-wallet + *${store.payment.adminFee}*`,
-    ' 𖥻 ̨𖥔 ִ ་ ، kirim bukti transaksi no crop',
-    ' 𖥻 ̨𖥔 ִ ་ ، tanpa fee pesanan tidak akan di proses',
+    ` 𖥻 ̨𖥔 ִ ་ ، ${tr('payment.note')}`,
+    ` 𖥻 ̨𖥔 ִ ་ ، ${tr('payment.noFee')}`,
     '',
-    ' *tf sesuai nominal dan biaya admin*'
+    ` *${tr('payment.exact')}*`
   );
   return lines.join('\n');
 };
@@ -256,15 +264,15 @@ export const orderProcessing = (order: {
 }): string => {
   const clock = now();
   return [
-    '🪺〔 *TRANSAKSI PROSES* 〕🪺',
+    '🪺〔 *' + tr('order.processing') + '* 〕🪺',
     '',
-    `> Trxid : ${order.refId}`,
-    `> Product : ${order.product}`,
-    `> Target : ${order.target}`,
-    `> Price : ${rupiah(order.price)}`,
-    '> Status : Prosess 🔄',
-    `> Calendar : ${clock.date}`,
-    `> Time : ${clock.time}`
+    `> ${tr('order.field.trxid')} : ${order.refId}`,
+    `> ${tr('order.field.product')} : ${order.product}`,
+    `> ${tr('order.field.target')} : ${order.target}`,
+    `> ${tr('order.field.price')} : ${rupiah(order.price)}`,
+    `> ${tr('order.field.status')} : ${tr('order.processingStatus')} 🔄`,
+    `> ${tr('order.field.date')} : ${clock.date}`,
+    `> ${tr('order.field.time')} : ${clock.time}`
   ].join('\n');
 };
 
@@ -278,17 +286,17 @@ export const orderSuccess = (order: {
 }): string => {
   const clock = now();
   const lines = [
-    '🐣〔 *TRANSAKSI SUCCESS* 〕🐣',
+    '🐣〔 *' + tr('order.success') + '* 〕🐣',
     '',
-    `> Trxid : ${order.refId}`,
-    `> Product : ${order.product}`,
-    `> Target : ${order.target}`,
-    `> Price : ${rupiah(order.price)}`,
-    '> Status : Sukses ✅',
-    `> Calendar : ${clock.date}`,
-    `> Time : ${clock.time}`
+    `> ${tr('order.field.trxid')} : ${order.refId}`,
+    `> ${tr('order.field.product')} : ${order.product}`,
+    `> ${tr('order.field.target')} : ${order.target}`,
+    `> ${tr('order.field.price')} : ${rupiah(order.price)}`,
+    `> ${tr('order.field.status')} : ${tr('order.successStatus')} ✅`,
+    `> ${tr('order.field.date')} : ${clock.date}`,
+    `> ${tr('order.field.time')} : ${clock.time}`
   ];
-  if (order.serial) lines.push('', '──〔 *SERIAL NUMBER* 〕──', order.serial);
+  if (order.serial) lines.push('', `──〔 *${tr('order.serial')}* 〕──`, order.serial);
   if (order.message) lines.push('', `_${order.message}_`);
   return lines.join('\n');
 };
@@ -299,101 +307,101 @@ export const orderFailed = (order: {
   target: string;
   message?: string;
 }): string => [
-  '🪹〔 *TRANSAKSI GAGAL* 〕🪹',
+  '🪹〔 *' + tr('order.failed') + '* 〕🪹',
   '',
-  `> Trxid : ${order.refId}`,
-  `> Product : ${order.product}`,
-  `> Target : ${order.target}`,
-  '> Status : Gagal ❌',
-  `> Note : ${order.message ?? 'transaksi ditolak penyedia'}`,
+  `> ${tr('order.field.trxid')} : ${order.refId}`,
+  `> ${tr('order.field.product')} : ${order.product}`,
+  `> ${tr('order.field.target')} : ${order.target}`,
+  `> ${tr('order.field.status')} : ${tr('order.failedStatus')} ❌`,
+  `> ${tr('order.field.note')} : ${order.message ?? tr('order.failedNote')}`,
   '',
-  'Jika saldo terpotong, hubungi owner untuk refund.'
+  tr('order.failedRefund')
 ].join('\n');
 
 export const orderPending = (order: { refId: string; product: string; target: string; message?: string }): string => [
-  '🕰️〔 *TRANSAKSI PENDING* 〕🕰️',
+  '🕰️〔 *' + tr('order.pending') + '* 〕🕰️',
   '',
-  `> Trxid : ${order.refId}`,
-  `> Product : ${order.product}`,
-  `> Target : ${order.target}`,
-  '> Status : Pending ⏳',
-  `> Note : ${order.message ?? 'menunggu konfirmasi penyedia'}`,
+  `> ${tr('order.field.trxid')} : ${order.refId}`,
+  `> ${tr('order.field.product')} : ${order.product}`,
+  `> ${tr('order.field.target')} : ${order.target}`,
+  `> ${tr('order.field.status')} : ${tr('order.pendingStatus')} ⏳`,
+  `> ${tr('order.field.note')} : ${order.message ?? tr('order.pendingNote')}`,
   '',
-  `Semak bila-bila masa: \`${store.prefix}status ${order.refId}\``
+  `${tr('order.checkAnytime')} \`${store.prefix}status ${order.refId}\``
 ].join('\n');
 
 export const depositCreated = (input: { id: string; amount: number }): string => [
-  '🧾〔 *DEPOSIT DIBUAT* 〕🧾',
+  '🧾〔 *' + tr('deposit.created') + '* 〕🧾',
   '',
-  `> Invoice : ${input.id}`,
-  `> Jumlah : ${rupiah(input.amount)}`,
-  '> Status : Menunggu bayaran ⏳',
+  `> ${tr('deposit.invoice')} : ${input.id}`,
+  `> ${tr('deposit.amount')} : ${rupiah(input.amount)}`,
+  `> ${tr('order.field.status')} : ${tr('deposit.waiting')} ⏳`,
   '',
   paymentInfo(),
   '',
-  'Selepas bayar, hantar bukti ke group. Owner akan approve.'
+  tr('deposit.afterPay')
 ].join('\n');
 
 export const depositReviewed = (input: { id: string; amount: number; status: 'approved' | 'rejected'; reason?: string }): string => [
-  input.status === 'approved' ? '✅〔 *DEPOSIT DITERIMA* 〕✅' : '❌〔 *DEPOSIT DITOLAK* 〕❌',
+  input.status === 'approved' ? '✅〔 *' + tr('deposit.approved') + '* 〕✅' : '❌〔 *' + tr('deposit.rejected') + '* 〕❌',
   '',
-  `> Invoice : ${input.id}`,
-  `> Jumlah : ${rupiah(input.amount)}`,
-  `> Status : ${input.status === 'approved' ? 'Berjaya ✅' : 'Ditolak ❌'}`,
-  ...(input.reason ? [`> Sebab : ${input.reason}`] : [])
+  `> ${tr('deposit.invoice')} : ${input.id}`,
+  `> ${tr('deposit.amount')} : ${rupiah(input.amount)}`,
+  `> ${tr('order.field.status')} : ${input.status === 'approved' ? tr('deposit.statusOk') + ' ✅' : tr('deposit.statusNo') + ' ❌'}`,
+  ...(input.reason ? [`> ${tr('deposit.reason')} : ${input.reason}`] : [])
 ].join('\n');
 
 export const depositList = (items: Array<{ id: string; amount: number }>): string => {
-  if (!items.length) return '📭 Tiada deposit pending sekarang.';
+  if (!items.length) return tr('deposit.empty');
   return [
-    '📋〔 *DEPOSIT PENDING* 〕📋',
+    '📋〔 *' + tr('deposit.pendingList') + '* 〕📋',
     '',
     ...items.map((item, index) => `${index + 1}. ${item.id} — ${rupiah(item.amount)}`),
     '',
-    `Approve: \`${store.prefix}approve [invoice]\``
+    `${tr('deposit.approveHint')} \`${store.prefix}approve [invoice]\``
   ].join('\n');
 };
 
 export const balanceInfo = (balance: number, currency: string): string => [
-  '💳〔 *SALDO PROVIDER* 〕💳',
+  '💳〔 *' + tr('balance.title') + '* 〕💳',
   '',
-  `> Baki : ${currency === 'IDR' ? rupiah(balance) : `${balance} ${currency}`}`,
-  `> Masa : ${now().time}`
+  `> ${tr('balance.left')} : ${currency === 'IDR' ? rupiah(balance) : `${balance} ${currency}`}`,
+  `> ${tr('balance.time')} : ${now().time}`
 ].join('\n');
 
 export const howToOrder = (): string => [
-  '📖〔 *CARA ORDER* 〕📖',
+  '📖〔 *' + tr('howto.title') + '* 〕📖',
   '',
-  '1. Taip kategori, cth `ml` atau `pubg`',
-  `2. Pilih kod produk, cth \`60UC\``,
-  `3. Order: \`${store.keyword} [kode] [target]\``,
-  '4. Bot akan hantar status transaksi',
+  tr('howto.step1'),
+  tr('howto.step2'),
+  tr('howto.step3', { keyword: store.keyword }),
+  tr('howto.step4'),
   '',
-  'Contoh:',
+  tr('howto.example'),
   `\`${store.keyword} 60UC 5123456789\``,
   `\`${store.keyword} 60UC 5123456789 2x\``,
   '',
-  `Semak status: \`${store.prefix}status [trxid]\``
+  `${tr('order.checkAnytime')} \`${store.prefix}status [trxid]\``
 ].join('\n');
 
 export const terms = (): string => [
-  '📜〔 *SYARAT & PERATURAN* 〕📜',
+  '📜〔 *' + tr('terms.title') + '* 〕📜',
   '',
-  `1. Pastikan data target betul sebelum order.`,
-  '2. Order salah target tidak boleh refund.',
-  '3. Proses 1-5 minit (maksimum 24 jam jika gangguan).',
-  '4. Simpan Trxid untuk semakan.',
-  `5. Deposit tidak boleh dipulangkan.`,
+  tr('terms.1'),
+  tr('terms.2'),
+  tr('terms.3'),
+  tr('terms.4'),
+  tr('terms.5'),
   ...(store.rules ? ['', store.rules] : [])
 ].join('\n');
 
 export const staffInfo = (): string => [
-  '👑〔 *OWNER / STAFF* 〕👑',
+  '👑〔 *' + tr('staff.title') + '* 〕👑',
   '',
-  `> Nama : ${store.ownerName}`,
-  ...(store.ownerContact ? [`> Hubungi : ${store.ownerContact}`] : []),
+  `> ${tr('staff.name')} : ${store.ownerName}`,
+  ...(store.ownerContact ? [`> ${tr('staff.contact')} : ${store.ownerContact}`] : []),
   '',
-  'Untuk komplen, refund atau order manual.'
+  tr('staff.note')
 ].join('\n');
 
 export const uptimeInfo = (uptimeMs: number, startedAt: string, style: string): string => {
@@ -401,57 +409,74 @@ export const uptimeInfo = (uptimeMs: number, startedAt: string, style: string): 
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return [
-    '⚡〔 *BOT STATUS* 〕⚡',
+    '⚡〔 *' + tr('uptime.title') + '* 〕⚡',
     '',
-    `> Uptime : ${hours}j ${minutes}m`,
-    `> Mula : ${startedAt}`,
-    `> Wording : ${style}`,
-    `> Masa : ${now().time}`
+    `> ${tr('uptime.uptime')} : ${hours}j ${minutes}m`,
+    `> ${tr('uptime.started')} : ${startedAt}`,
+    `> ${tr('uptime.wording')} : ${style}`,
+    `> ${tr('uptime.time')} : ${now().time}`
   ].join('\n');
 };
 
 export const errors = {
   ownerOnly: () => [
-    '🚫〔 *AKSES DITOLAK* 〕🚫',
+    '🚫〔 *' + tr('error.ownerOnly.title') + '* 〕🚫',
     '',
-    '> Command ini hanya untuk owner yang sah.',
-    `> Owner claim: \`${store.prefix}claimowner\``
+    `> ${tr('error.ownerOnly.body')}`,
+    `> ${tr('error.ownerOnly.hint')} \`${store.prefix}claimowner\``
   ].join('\n'),
-  ownerGroupOnly: () => '🚫 Owner claim hanya boleh dibuat dalam group.',
-  claimSuccess: () => '👑 Owner group berjaya didaftarkan. Command owner kini aktif.',
-  claimExists: () => '👑 Group ini sudah ada owner.',
-  claimNotAdmin: () => '🚫 Hanya admin group boleh claim owner.',
-  claimFailed: () => '⚠️ Tidak dapat sahkan admin group. Cuba lagi.',
-  digiflazzMissing: () => '⚠️ Digiflazz belum dikonfigurasi. Hubungi owner.',
-  usage: (text: string) => `📝 *Format salah*\n\n> ${text}`,
-  aiDisabled: () => `🤖 AI belum diaktifkan.\n> Owner perlu set \`LLM_ENABLED=true\`.`,
-  aiRateLimited: () => '⏳ Sabar sikit ya, cuba lagi dalam beberapa saat.',
-  aiFailed: (message: string) => `⚠️ AI ralat: ${message}`,
-  priceFailed: (message: string) => `⚠️ Carian harga gagal: ${message}`,
-  requestFailed: (message: string) => `⚠️ Ralat: ${message}`,
-  unknown: () => `❓ Command tidak dikenali.\n> Taip \`${store.prefix}menu\` untuk senarai.`,
+  ownerGroupOnly: () => tr('error.ownerGroupOnly'),
+  claimSuccess: () => tr('error.claimSuccess'),
+  claimExists: () => tr('error.claimExists'),
+  claimNotAdmin: () => tr('error.claimNotAdmin'),
+  claimFailed: () => tr('error.claimFailed'),
+  digiflazzMissing: () => tr('error.digiflazzMissing'),
+  usage: (text: string) => `${tr('error.usage')}\n\n> ${text}`,
+  aiDisabled: () => tr('error.aiDisabled'),
+  aiRateLimited: () => tr('error.aiRateLimited'),
+  aiFailed: (message: string) => tr('error.aiFailed', { message }),
+  priceFailed: (message: string) => tr('error.priceFailed', { message }),
+  requestFailed: (message: string) => tr('error.requestFailed', { message }),
+  unknown: () => tr('error.unknown', { prefix: store.prefix }),
   orderPublicDisabled: () => [
-    '🚫〔 *ORDER DITUTUP* 〕🚫',
+    '🚫〔 *' + tr('error.orderClosed.title') + '* 〕🚫',
     '',
-    '> Order awam belum dibuka.',
-    '> Hubungi owner untuk order manual.'
+    `> ${tr('error.orderClosed.body')}`,
+    `> ${tr('error.orderClosed.hint')}`
   ].join('\n'),
-  orderQtyTooHigh: () => `⚠️ Maksimum ${store.maxQty}x setiap order.`,
-  rateLimited: () => '⏳ Terlalu banyak mesej. Cuba lagi sebentar.'
+  orderQtyTooHigh: () => tr('error.qtyTooHigh', { max: store.maxQty }),
+  rateLimited: () => tr('error.rateLimited')
 };
 
+/** Getters keep the text in the language of the message being handled. */
 export const usage = {
-  order: `\`${store.keyword} [kode] [target] [qty]x\`\nContoh: \`${store.keyword} MLID500 12345678\``,
-  topup: `\`${store.prefix}topup [sku] [target]\``,
-  deposit: `\`${store.prefix}deposit [jumlah]\``,
-  status: `\`${store.prefix}status [trxid]\``,
-  price: `\`${store.prefix}price [kata kunci]\``,
-  approve: `\`${store.prefix}approve [invoice]\``,
-  reject: `\`${store.prefix}reject [invoice] [sebab]\``,
-  ai: `\`${store.prefix}ai [soalan]\``
+  get order(): string {
+    return tr('usage.order', { keyword: store.keyword });
+  },
+  get topup(): string {
+    return tr('usage.topup', { prefix: store.prefix });
+  },
+  get deposit(): string {
+    return tr('usage.deposit', { prefix: store.prefix });
+  },
+  get status(): string {
+    return tr('usage.status', { prefix: store.prefix });
+  },
+  get price(): string {
+    return tr('usage.price', { prefix: store.prefix });
+  },
+  get approve(): string {
+    return tr('usage.approve', { prefix: store.prefix });
+  },
+  get reject(): string {
+    return tr('usage.reject', { prefix: store.prefix });
+  },
+  get ai(): string {
+    return tr('usage.ai', { prefix: store.prefix });
+  }
 };
 
-export const helpFooter = (): string => `Hubungi ${store.ownerName} untuk bantuan lanjut.`;
+export const helpFooter = (): string => tr('footer.help', { owner: store.ownerName });
 
 export interface CategoryLine {
   key: string;
@@ -462,21 +487,25 @@ export interface CategoryLine {
 }
 
 const statusBadge = (active: number, inactive: number): string =>
-  inactive === 0 ? 'Aktif penuh ✅' : active === 0 ? 'Nonaktif ⛔' : `${active} aktif / ${inactive} nonaktif ⚠️`;
+  inactive === 0
+    ? tr('badge.full')
+    : active === 0
+      ? tr('badge.none')
+      : tr('badge.mixed', { active, inactive });
 
 export const categoryOverview = (senderName: string, lines: CategoryLine[]): string => {
   const body = lines.map((line) =>
-    `   ${theme.bullet} *${line.label}* — ${line.total} produk · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``);
+    `   ${theme.bullet} *${line.label}* — ${line.total} ${tr('sub.products')} · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``);
 
   return [
     greetingHeader(senderName),
     '',
-    '      ⤿ ֵ ˳  ᴋᴀᴛᴇɢᴏʀɪ',
+    `      ⤿ ֵ ˳  ${tr('category.heading')}`,
     theme.soft,
     ...body,
     '',
-    'Ketik nama kategori untuk lihat subkategori.',
-    `Contoh: \`ml\` · \`pln\` · \`pulsa\``,
+    tr('category.hint'),
+    `${tr('category.example')} \`ml\` · \`pln\` · \`pulsa\``,
     '',
     theme.footer.replace('%STORE%', store.name)
   ].join('\n');
@@ -493,19 +522,19 @@ export interface SubCategoryLine {
 export const subcategoryOverview = (category: { label: string; total: number; active: number; inactive: number }, lines: SubCategoryLine[]): string => [
   `───═[ *${category.label.toUpperCase()}* ]═───`,
   '',
-  `> Jumlah : ${category.total} produk`,
-  `> Status : ${statusBadge(category.active, category.inactive)}`,
+  `> ${tr('sub.total')} : ${category.total} ${tr('sub.products')}`,
+  `> ${tr('sub.status')} : ${statusBadge(category.active, category.inactive)}`,
   '',
   theme.soft,
-  ...lines.map((line) => `   ${theme.bullet} ${line.label} — ${line.total} produk · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``),
+  ...lines.map((line) => `   ${theme.bullet} ${line.label} — ${line.total} ${tr('sub.products')} · ${statusBadge(line.active, line.inactive)}\n     \`${line.key}\``),
   '',
-  'Ketik subkategori untuk lihat produk.',
-  `Tapis: \`${store.prefix}aktif ${category.label}\` atau \`${store.prefix}nonaktif ${category.label}\``
+  tr('sub.hint'),
+  `${tr('sub.filter')} \`${store.prefix}aktif ${category.label}\` / \`${store.prefix}nonaktif ${category.label}\``
 ].join('\n');
 
 export const filterNotice = (mode: 'all' | 'active' | 'inactive', label: string): string =>
   mode === 'active'
-    ? `✅ Menunjuk produk *aktif* sahaja untuk ${label}.`
+    ? tr('filter.active', { label })
     : mode === 'inactive'
-      ? `⛔ Menunjuk produk *nonaktif/gangguan* untuk ${label}.`
-      : `📦 Semua produk untuk ${label}.`;
+      ? tr('filter.inactive', { label })
+      : tr('filter.all', { label });
