@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { theme } from './theme.js';
 
 const env = (key: string, fallback = ''): string => (process.env[key] ?? fallback).trim();
 
@@ -7,6 +8,8 @@ export const store = {
   tagline: env('STORE_TAGLINE', 'lovely · trustable · fast'),
   keyword: env('STORE_KEYWORD', 'merlynn').toLowerCase(),
   ownerName: env('STORE_OWNER', 'Owner'),
+  ownerContact: env('STORE_CONTACT', ''),
+  rules: env('STORE_RULES', ''),
   prefix: env('COMMAND_PREFIX', '.'),
   timezone: env('STORE_TIMEZONE', 'Asia/Jakarta'),
   orderAllowPublic: ['true', '1', 'yes'].includes(env('ORDER_ALLOW_PUBLIC', 'false').toLowerCase()),
@@ -20,6 +23,47 @@ export const store = {
     adminFee: env('PAYMENT_ADMIN_FEE', '1.000')
   }
 } as const;
+
+export interface Category {
+  key: string;
+  label: string;
+  needles: string[];
+}
+
+/** Short store commands mapped to product keyword searches. */
+export const categories: Category[] = [
+  { key: 'ml', label: 'Mobile Legends', needles: ['mobile legends', 'mobile legend'] },
+  { key: 'ff', label: 'Free Fire', needles: ['free fire'] },
+  { key: 'pubg', label: 'PUBG Mobile', needles: ['pubg'] },
+  { key: 'codm', label: 'Call of Duty Mobile', needles: ['call of duty'] },
+  { key: 'genshin', label: 'Genshin Impact', needles: ['genshin'] },
+  { key: 'hok', label: 'Honor of Kings', needles: ['honor of kings'] },
+  { key: 'valorant', label: 'Valorant', needles: ['valorant'] },
+  { key: 'roblox', label: 'Roblox / Robux', needles: ['roblox', 'robux'] },
+  { key: 'starlight', label: 'Starlight ML', needles: ['starlight'] },
+  { key: 'steam', label: 'Steam Wallet', needles: ['steam'] },
+  { key: 'gplay', label: 'Google Play', needles: ['google play'] },
+  { key: 'pln', label: 'PLN / Token Listrik', needles: ['pln', 'token listrik'] },
+  { key: 'pulsa', label: 'Pulsa', needles: ['pulsa'] },
+  { key: 'data', label: 'Paket Data', needles: ['data', 'internet'] },
+  { key: 'emoney', label: 'E-Money', needles: ['dana', 'gopay', 'shopeepay', 'ovo', 'linkaja'] },
+  { key: 'telkomsel', label: 'Telkomsel', needles: ['telkomsel'] },
+  { key: 'indosat', label: 'Indosat', needles: ['indosat'] },
+  { key: 'xl', label: 'XL', needles: ['xl'] },
+  { key: 'axis', label: 'Axis', needles: ['axis'] },
+  { key: 'tri', label: 'Tri', needles: ['tri'] },
+  { key: 'smartfren', label: 'Smartfren', needles: ['smartfren'] },
+  { key: 'byu', label: 'by.U', needles: ['by.u', 'byu'] },
+  { key: 'tiktok', label: 'TikTok', needles: ['tiktok'] },
+  { key: 'instagram', label: 'Instagram', needles: ['instagram'] },
+  { key: 'youtube', label: 'YouTube', needles: ['youtube'] },
+  { key: 'spotify', label: 'Spotify', needles: ['spotify'] },
+  { key: 'netflix', label: 'Netflix', needles: ['netflix'] },
+  { key: 'voucher', label: 'Voucher', needles: ['voucher', 'vcr'] }
+];
+
+export const findCategory = (name: string): Category | undefined =>
+  categories.find((category) => category.key === name.toLowerCase());
 
 const rupiah = (value: number | string | undefined): string => {
   const num = typeof value === 'number' ? value : Number(value);
@@ -49,14 +93,13 @@ const now = (): { date: string; time: string; greeting: string } => {
   };
 };
 
-const LINE = '━━━ • ━━━ • ━━━ • ━━━ • ━━━ •';
-const SOFT = '꒰  ࣪. ━ׄ─ִ─ׁ─ִ─ׁ─𔕙─ׅ─ׁ─ׅ─ׁ─ׅ━ ˖ ࣪꒱';
-
 export const newRefId = (): string => `MLY-${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`;
+export const money = rupiah;
+export const divider = (): string => theme.line;
 
 export const banner = (): string => [
-  'ﾟ ˖ ✦ : ⤿ ' + store.name + ' ✦',
-  '   🌦️ ‧˚ʚ ' + store.tagline + ' ɞ˚⋆  ⸝⸝`'
+  theme.header(store.name),
+  `   🌦️ ‧˚ʚ ${store.tagline} ɞ˚⋆  ⸝⸝\``
 ].join('\n');
 
 export const greetingHeader = (senderName: string): string => {
@@ -79,8 +122,8 @@ export interface MenuSection {
 export const menu = (senderName: string, sections: MenuSection[]): string => {
   const body = sections.map((section) => [
     `      ⤿ ֵ ˳  ${section.title}`,
-    SOFT,
-    ...section.items.map((item) => `   ᥴ⃘ᦱ ֹ ${item}`)
+    theme.soft,
+    ...section.items.map((item) => `   ${theme.bullet} ${item}`)
   ].join('\n'));
 
   return [
@@ -88,8 +131,7 @@ export const menu = (senderName: string, sections: MenuSection[]): string => {
     '',
     ...body,
     '',
-    '      ╭╸ ۫  ⸼ happy shopping  𝅄 ׄ',
-    `      ╰╸ֵ ֹ ✦  ${store.name} ✧ ׄ  ⃘✿`
+    theme.footer.replace('%STORE%', store.name)
   ].join('\n');
 };
 
@@ -117,22 +159,74 @@ export const productList = (brand: string, products: ProductView[], keyword: str
     `Contoh Isi 2x : \`${keyword} ${products[0]?.code ?? 'SKU'} 12345678 2x\``
   ].join('\n');
 
-  const body = products.map((product) => [LINE, '', productBlock(product)].join('\n')).join('\n\n');
+  const body = products.map((product) => [theme.line, '', productBlock(product)].join('\n')).join('\n\n');
 
-  return [head, '', body, '', LINE, '', `Ada ${products.length} produk ditampilkan.`].join('\n');
+  return [head, '', body, '', theme.line, '', `Ada ${products.length} produk ditampilkan.`].join('\n');
+};
+
+export interface BrandSummary {
+  brand: string;
+  count: number;
+}
+
+export const catalogue = (summaries: BrandSummary[], senderName: string): string => {
+  const header = [
+    greetingHeader(senderName),
+    '',
+    `      ⤿ ֵ ˳  ᴄᴀᴛᴀʟᴏɢᴜᴇ ᴘʀᴏᴅᴜᴋ`,
+    theme.soft
+  ].join('\n');
+
+  const grouped = new Map<string, string[]>();
+  for (const category of categories) {
+    const hit = summaries.find((summary) =>
+      category.needles.some((needle) => summary.brand.toLowerCase().includes(needle)));
+    if (!hit) continue;
+    const list = grouped.get(category.label) ?? [];
+    list.push(`${hit.brand} (${hit.count})`);
+    grouped.set(category.label, list);
+  }
+
+  const lines: string[] = [];
+  for (const [label, brands] of grouped) {
+    lines.push(`   ${theme.bullet} ${label} — ${brands.join(', ')}`);
+  }
+
+  const other = summaries
+    .filter((summary) => !categories.some((category) =>
+      category.needles.some((needle) => summary.brand.toLowerCase().includes(needle))))
+    .slice(0, 8)
+    .map((summary) => `${summary.brand} (${summary.count})`);
+
+  if (other.length) {
+    lines.push(`   ${theme.bullet} Lain-lain — ${other.join(', ')}`);
+  }
+
+  return [
+    header,
+    ...lines,
+    '',
+    'Buka kategori (tanpa prefix):',
+    ...categories.slice(0, 12).map((category) => `   • ${category.key}`).join(' ')
+      .split('\n'),
+    '',
+    `Atau cari terus: \`${store.prefix}price [kata kunci]\``,
+    '',
+    theme.footer.replace('%STORE%', store.name)
+  ].join('\n');
 };
 
 export const noProducts = (query: string): string => [
-  '╭╸ ⃘✿ *produk tidak dijumpai*',
-  `> Carian : ${query || '-'}`,
-  '> Cuba kata kunci lain, cth: `ml`, `pubg`, `telkomsel`',
+  `╭╸ ⃘✿ *produk tidak dijumpai*`,
+  `│ Carian : ${query || '-'}`,
+  '│ Cuba kata kunci lain, cth: `ml`, `pubg`, `telkomsel`',
   `╰╸ ֹ ${store.prefix}price [kata kunci]`
 ].join('\n');
 
 export const paymentInfo = (): string => {
   const lines = [
     'ᥫ᭡ ˖ ࣪ ‹ 𖥔 payment ‧˚ʚ ' + store.name + ' ɞ˚⋆｡',
-    ' 𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲𓄲',
+    theme.soft,
     '',
     ` - 𓊆 *${store.payment.qrisNote}* 𓊇`,
     '',
@@ -194,12 +288,8 @@ export const orderSuccess = (order: {
     `> Calendar : ${clock.date}`,
     `> Time : ${clock.time}`
   ];
-  if (order.serial) {
-    lines.push('', '──〔 *SERIAL NUMBER* 〕──', order.serial);
-  }
-  if (order.message) {
-    lines.push('', `_${order.message}_`);
-  }
+  if (order.serial) lines.push('', '──〔 *SERIAL NUMBER* 〕──', order.serial);
+  if (order.message) lines.push('', `_${order.message}_`);
   return lines.join('\n');
 };
 
@@ -270,6 +360,55 @@ export const balanceInfo = (balance: number, currency: string): string => [
   `> Baki : ${currency === 'IDR' ? rupiah(balance) : `${balance} ${currency}`}`,
   `> Masa : ${now().time}`
 ].join('\n');
+
+export const howToOrder = (): string => [
+  '📖〔 *CARA ORDER* 〕📖',
+  '',
+  '1. Taip kategori, cth `ml` atau `pubg`',
+  `2. Pilih kod produk, cth \`60UC\``,
+  `3. Order: \`${store.keyword} [kode] [target]\``,
+  '4. Bot akan hantar status transaksi',
+  '',
+  'Contoh:',
+  `\`${store.keyword} 60UC 5123456789\``,
+  `\`${store.keyword} 60UC 5123456789 2x\``,
+  '',
+  `Semak status: \`${store.prefix}status [trxid]\``
+].join('\n');
+
+export const terms = (): string => [
+  '📜〔 *SYARAT & PERATURAN* 〕📜',
+  '',
+  `1. Pastikan data target betul sebelum order.`,
+  '2. Order salah target tidak boleh refund.',
+  '3. Proses 1-5 minit (maksimum 24 jam jika gangguan).',
+  '4. Simpan Trxid untuk semakan.',
+  `5. Deposit tidak boleh dipulangkan.`,
+  ...(store.rules ? ['', store.rules] : [])
+].join('\n');
+
+export const staffInfo = (): string => [
+  '👑〔 *OWNER / STAFF* 〕👑',
+  '',
+  `> Nama : ${store.ownerName}`,
+  ...(store.ownerContact ? [`> Hubungi : ${store.ownerContact}`] : []),
+  '',
+  'Untuk komplen, refund atau order manual.'
+].join('\n');
+
+export const uptimeInfo = (uptimeMs: number, startedAt: string, style: string): string => {
+  const seconds = Math.floor(uptimeMs / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return [
+    '⚡〔 *BOT STATUS* 〕⚡',
+    '',
+    `> Uptime : ${hours}j ${minutes}m`,
+    `> Mula : ${startedAt}`,
+    `> Wording : ${style}`,
+    `> Masa : ${now().time}`
+  ].join('\n');
+};
 
 export const errors = {
   ownerOnly: () => [
