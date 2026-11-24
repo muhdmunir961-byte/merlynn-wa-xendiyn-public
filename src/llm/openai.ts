@@ -152,7 +152,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         model,
         stream: false,
         temperature: 0.7,
-        max_tokens: 20,
+        max_tokens: 16,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userContent }
