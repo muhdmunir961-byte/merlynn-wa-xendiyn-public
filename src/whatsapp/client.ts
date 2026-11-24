@@ -75,6 +75,13 @@ const safeAmount = (value: string | undefined): number | undefined => {
   return Number.isSafeInteger(amount) && amount > 0 ? amount : undefined;
 };
 const oneLine = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+/** Models sometimes emit zero-width or non-breaking characters; strip them. */
+const cleanReply = (value: string): string =>
+  value
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .trim();
 const displayName = (message: WAMessage, jid: string): string => {
   const name = message.pushName?.trim();
   if (name) return name;
@@ -1288,7 +1295,7 @@ export class WhatsAppClient {
       const next = [...history, `User: ${oneLine(prompt)}`, `Assistant: ${oneLine(answer)}`]
         .slice(-Math.max(2, config.llmHistoryLimit));
       this.histories.set(jid, next);
-      await this.reply(jid, answer);
+      await this.reply(jid, cleanReply(answer) || tr('error.aiEmpty'));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'request gagal';
       if (message === 'DEADLINE') {
